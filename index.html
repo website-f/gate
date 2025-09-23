@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gate Controller System</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+</head>
+<body>
+    <div class="app-container">
+        <nav class="sidebar">
+            <div class="sidebar-header">
+                <h2><i class="fas fa-shield-alt"></i> Gate Control</h2>
+            </div>
+            <ul class="nav-menu">
+                <li><a href="#dashboard" class="nav-link active" data-page="dashboard">
+                    <i class="fas fa-chart-pie"></i> Dashboard
+                </a></li>
+                <li><a href="#users" class="nav-link" data-page="users">
+                    <i class="fas fa-users"></i> Users
+                </a></li>
+                <li><a href="#areas" class="nav-link" data-page="areas">
+                    <i class="fas fa-map-marker-alt"></i> Areas
+                </a></li>
+                <li><a href="#devices" class="nav-link" data-page="devices">
+                    <i class="fas fa-microchip"></i> Devices
+                </a></li>
+                <li><a href="#settings" class="nav-link" data-page="settings">
+                    <i class="fas fa-cog"></i> Settings
+                </a></li>
+            </ul>
+        </nav>
+
+        <main class="main-content">
+            <header class="top-header">
+                <h1 id="page-title">Dashboard</h1>
+                <div class="header-actions">
+                    <span class="user-info">
+                        <i class="fas fa-user-circle"></i> Administrator
+                    </span>
+                </div>
+            </header>
+
+            <div id="dashboard-page" class="page active">
+                <div class="page-header">
+                    <div class="search-bar"></div>
+                    <div class="header-actions">
+                        <button class="btn btn-secondary" onclick="refreshPageData('dashboard')">
+                            <i class="fas fa-sync"></i> Refresh
+                        </button>
+                    </div>
+                </div>
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-icon">
+                            <i class="fas fa-users"></i>
+                        </div>
+                        <div class="stat-content">
+                            <h3>Total Users</h3>
+                            <p class="stat-number" id="total-users">247</p>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">
+                            <i class="fas fa-microchip"></i>
+                        </div>
+                        <div class="stat-content">
+                            <h3>Active Devices</h3>
+                            <p class="stat-number" id="active-devices">12</p>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">
+                            <i class="fas fa-map-marker-alt"></i>
+                        </div>
+                        <div class="stat-content">
+                            <h3>Total Areas</h3>
+                            <p class="stat-number" id="total-areas">8</p>
+                        </div>
+                    </div>
+                    
+                </div>
+                <!-- <div class="recent-activities">
+                    <h3>Recent Activities</h3>
+                    <div class="activity-list" id="activity-list">
+                    </div>
+                </div> -->
+            </div>
+
+            <div id="users-page" class="page">
+                <div class="page-header">
+                    <div class="search-bar">
+                        <i class="fas fa-search"></i>
+                        <input type="text" id="user-search" placeholder="Search ...">
+                    </div>
+                    <div class="header-actions">
+                        <button class="btn btn-secondary" onclick="refreshPageData('users')">
+                            <i class="fas fa-sync"></i> Refresh
+                        </button>
+                        <button class="btn btn-primary" onclick="openAddUserModal()">
+                            <i class="fas fa-plus"></i> Add User
+                        </button>
+                          <button class="btn btn-danger" onclick="bulkDeleteUsers()">Delete Selected</button>
+                          <button class="btn btn-primary" onclick="syncApi()">
+                              <i class="fas fa-cloud-download-alt"></i> API Sync
+                          </button>
+                    </div>
+                </div>
+                <div class="table-container">
+                    <table class="data-table" id="users-table">
+                        <thead>
+                            <tr>
+                                <th>
+                                    <input type="checkbox" id="select-all" onclick="toggleSelectAll(this)">
+                                </th>
+                                <th>Name</th>
+                                <th>Order Detail ID</th>
+                                <th>Order ID</th>
+                                <th>End Date</th>
+                                <th>Status</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="users-tbody">
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div id="areas-page" class="page">
+                <div class="page-header">
+                    <div class="search-bar">
+                        <i class="fas fa-search"></i>
+                        <input type="text" id="area-search" placeholder="Search areas...">
+                    </div>
+                    <div class="header-actions">
+                        <button class="btn btn-secondary" onclick="refreshPageData('areas')">
+                            <i class="fas fa-sync"></i> Refresh
+                        </button>
+                        <button class="btn btn-primary" onclick="openAddAreaModal()">
+                            <i class="fas fa-plus"></i> Add Area
+                        </button>
+                    </div>
+                </div>
+                <div class="table-container">
+                    <table class="data-table" id="areas-table">
+                        <thead>
+                            <tr>
+                                <th>Area Name</th>
+                                <th>Description</th>
+                                <th>Devices</th>
+                                <th>Users</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="areas-tbody">
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div id="devices-page" class="page">
+                <div class="page-header">
+                    <div class="search-bar">
+                        <i class="fas fa-search"></i>
+                        <input type="text" id="device-search" placeholder="Search devices...">
+                    </div>
+                    <div class="header-actions">
+                        <button class="btn btn-secondary" onclick="refreshPageData('devices')">
+                            <i class="fas fa-sync"></i> Refresh
+                        </button>
+                        <button class="btn btn-primary" onclick="openAddDeviceModal()">
+                            <i class="fas fa-plus"></i> Add Device
+                        </button>
+                    </div>
+                </div>
+                <div class="table-container">
+                    <table class="data-table" id="devices-table">
+                        <thead>
+                            <tr>
+                                <th>Device Name</th>
+                                <th>IP Address</th>
+                                <th>Area</th>
+                                <th>Status</th>
+                                <th>Last Seen</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="devices-tbody">
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div id="settings-page" class="page">
+                <div class="settings-container">
+                    <div class="settings-section">
+                        <h3>API Configuration</h3>
+                        <div class="form-group">
+                            <label for="backoffice-api-url">Backoffice API URL</label>
+                            <input type="text" id="backoffice-api-url" class="form-control" placeholder="https://api.yourcompany.com/api">
+                        </div>
+                        <div class="form-group">
+                            <label for="sync-api-url">Sync API URL</label>
+                            <input type="text" id="sync-api-url" class="form-control" placeholder="https://api.yourcompany.com/api">
+                        </div>
+                        <div class="form-group">
+                            <label for="device-password">Device Password</label>
+                            <input type="password" id="device-password" class="form-control" placeholder="Enter device password">
+                        </div>
+                    </div>
+                    
+                    <div class="settings-section">
+                        <h3>API Credentials</h3>
+                        <div class="form-group">
+                            <label for="api-email">Email</label>
+                            <input type="email" id="api-email" class="form-control" placeholder="Enter API email">
+                        </div>
+                        <div class="form-group">
+                            <label for="api-password">Password</label>
+                            <input type="password" id="api-password" class="form-control" placeholder="Enter API password">
+                        </div>
+                    </div>
+                    <div class="settings-section">
+                        <h3>System Settings</h3>
+                        <div class="form-group">
+                            <label for="store-name">Store/Company Name</label>
+                            <input type="text" id="store-name" class="form-control" placeholder="Enter company name">
+                        </div>
+                        <div class="form-group">
+                            <label for="timezone">Timezone</label>
+                            <select id="timezone" class="form-control">
+                                <option value="UTC">UTC</option>
+                                <option value="America/New_York">Eastern Time</option>
+                                <option value="America/Los_Angeles">Pacific Time</option>
+                                <option value="Europe/London">London</option>
+                                <option value="Asia/Kuala_Lumpur">Kuala Lumpur</option>
+                                <option value="Asia/Tokyo">Tokyo</option>
+                            </select>
+                        </div>
+                    </div>
+            
+                    <div class="settings-section">
+                        <h3>Security Settings</h3>
+                        <div class="form-group">
+                            <label class="checkbox-label">
+                                <input type="checkbox" id="enable-2fa">
+                                <span class="checkmark"></span>
+                                Enable Two-Factor Authentication
+                            </label>
+                        </div>
+                        <div class="form-group">
+                            <label class="checkbox-label">
+                                <input type="checkbox" id="enable-logging">
+                                <span class="checkmark"></span>
+                                Enable Access Logging
+                            </label>
+                        </div>
+                    </div>
+            
+                    <div class="form-actions">
+                        <button class="btn btn-primary" onclick="saveSettings()">
+                            <i class="fas fa-save"></i> Save Settings
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <div id="modal-overlay" class="modal-overlay">
+        <div id="add-user-modal" class="modal">
+            <div class="modal-header">
+                <h3>Add New User</h3>
+                <button class="modal-close" onclick="closeModal()">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="modal-body">
+                <form id="add-user-form">
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="user-name">Full Name</label>
+                            <input type="text" id="user-name" class="form-control" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="user-email">Email</label>
+                            <input type="email" id="user-email" class="form-control" required>
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="user-role">Role</label>
+                            <select id="user-role" class="form-control" required>
+                                <option value="">Select Role</option>
+                                <option value="admin">Administrator</option>
+                                <option value="manager">Manager</option>
+                                <option value="employee">Employee</option>
+                                <option value="guest">Guest</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label for="user-area">Area Access</label>
+                            <select id="user-area" class="form-control" required>
+                                <option value="">Select Area</option>
+                                <option value="lobby">Main Lobby</option>
+                                <option value="office">Office Floor</option>
+                                <option value="warehouse">Warehouse</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>Face Registration</label>
+                        <div class="face-capture-section">
+                            <div class="capture-options">
+                                <button type="button" class="btn btn-secondary" onclick="openCamera()">
+                                    <i class="fas fa-camera"></i> Capture Photo
+                                </button>
+                                <button type="button" class="btn btn-secondary" onclick="document.getElementById('face-upload').click()">
+                                    <i class="fas fa-upload"></i> Upload Photo
+                                </button>
+                                <input type="file" id="face-upload" accept="image/*" style="display: none;" onchange="handleFileUpload(event)">
+                            </div>
+                            <div id="camera-container" style="display: none;">
+                                <video id="camera-video" autoplay playsinline></video>
+                                <div class="camera-controls">
+                                    <button type="button" class="btn btn-primary" onclick="capturePhoto()">
+                                        <i class="fas fa-camera"></i> Capture
+                                    </button>
+                                    <button type="button" class="btn btn-secondary" onclick="closeCamera()">
+                                        Cancel
+                                    </button>
+                                </div>
+                            </div>
+                            <div id="photo-preview" style="display: none;">
+                                <img id="captured-photo" alt="Captured face">
+                                <button type="button" class="btn btn-secondary btn-sm" onclick="retakePhoto()">
+                                    <i class="fas fa-redo"></i> Retake
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                <button id="save-user-btn" class="btn btn-primary" onclick="saveUser()">
+                    <i class="fas fa-save"></i> Save User
+                </button>
+            </div>
+        </div>
+
+        <div id="view-user-modal" class="modal">
+            <div class="modal-header">
+                <h3>User Details</h3>
+                <button class="modal-close" onclick="closeModal()">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="modal-body">
+                <div class="user-details" id="user-details">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal()">Close</button>
+                <button class="btn btn-warning" id="toggle-user-btn" onclick="toggleUserStatus()">
+                    <i class="fas fa-user-slash"></i> Disable User
+                </button>
+            </div>
+        </div>
+
+        <div id="add-area-modal" class="modal">
+            <div class="modal-header">
+                <h3 id="area-modal-title">Add New Area</h3>
+                <button class="modal-close" onclick="closeModal()">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="modal-body">
+                <form id="add-area-form">
+                    <div class="form-group">
+                        <label for="area-name">Area Name</label>
+                        <input type="text" id="area-name" class="form-control" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="area-description">Description</label>
+                        <textarea id="area-description" class="form-control" rows="3"></textarea>
+                    </div>
+                    <div class="form-group">
+                        <label for="area-access-level">Access Level</label>
+                        <select id="area-access-level" class="form-control" required>
+                            <option value="low">Low Security</option>
+                            <option value="medium">Medium Security</option>
+                            <option value="high">High Security</option>
+                        </select>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="saveArea()">
+                    <i class="fas fa-save"></i> Save Area
+                </button>
+            </div>
+        </div>
+
+        <div id="add-device-modal" class="modal">
+            <div class="modal-header">
+                <h3 id="device-modal-title">Add New Device</h3>
+                <button class="modal-close" onclick="closeModal()">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="modal-body">
+                <form id="add-device-form">
+                    <div class="form-group">
+                        <label for="device-name">Device Name</label>
+                        <input type="text" id="device-name" class="form-control" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="device-ip">IP Address</label>
+                        <input type="text" id="device-ip" class="form-control" pattern="^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="device-password">Device Password</label>
+                        <input type="password" id="device-password" class="form-control" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="device-area">Assigned Area</label>
+                        <select id="device-area" class="form-control" required>
+                            <option value="">Select Area</option>
+                            <option value="lobby">Main Lobby</option>
+                            <option value="office">Office Floor</option>
+                            <option value="warehouse">Warehouse</option>
+                        </select>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="saveDevice()">
+                    <i class="fas fa-save"></i> Save Device
+                </button>
+            </div>
+        </div>
+
+        <div id="edit-device-modal" class="modal">
+            <div class="modal-header">
+                <h3 id="edit-device-modal-title">Edit Device</h3>
+                <button class="modal-close" onclick="closeModal()">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="modal-body">
+                <form id="edit-device-form">
+                    <input type="hidden" id="edit-device-id">
+                    <div class="form-group">
+                        <label for="edit-device-name">Device Name</label>
+                        <input type="text" id="edit-device-name" class="form-control" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="edit-device-ip">IP Address</label>
+                        <input type="text" id="edit-device-ip" class="form-control" pattern="^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="edit-device-area">Assigned Area</label>
+                        <select id="edit-device-area" class="form-control" required>
+                        </select>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="updateDevice()">
+                    <i class="fas fa-save"></i> Update Device
+                </button>
+            </div>
+        </div>
+
+        <div id="confirmation-modal" class="modal">
+            <div class="modal-header">
+                <h3 id="confirm-title">Confirm Action</h3>
+                <button class="modal-close" onclick="closeModal()">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="modal-body">
+                <p id="confirm-message">Are you sure you want to perform this action?</p>
+                <div class="form-group">
+                    <label for="confirm-input">Type "confirm" to proceed:</label>
+                    <input type="text" id="confirm-input" class="form-control" placeholder="confirm">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                <button class="btn btn-danger" id="confirm-action-btn" onclick="executeConfirmedAction()" disabled>
+                    Confirm
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <div id="loading-backdrop" class="loading-backdrop">
+        <div class="loading-spinner"></div>
+    </div>
+
+    <script src="script.js"></script>
+    
+</body>
+</html>
