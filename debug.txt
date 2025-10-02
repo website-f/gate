@@ -1,0 +1,13 @@
+netsh advfirewall firewall add rule name="Allow Node 3000" dir=in action=allow protocol=TCP localport=3000 profile=private,public
+
+
+netsh advfirewall firewall add rule name="Allow Node.exe" dir=in action=allow program="C:\Program Files\nodejs\node.exe" enable=yes profile=private,public
+
+
+route add 192.168.100.150 mask 255.255.255.255 127.0.0.1
+
+
+netsh advfirewall set allprofiles state off
+
+
+netsh advfirewall set allprofiles state on
