@@ -626,7 +626,7 @@ function startApiServer() {
                     email: userData.email || null,
                     role: "guest",
                     area: "default",
-                    status: "Not Paid",
+                    status: null,
                     base64: user_image || null,
                     photo: photoPath || null,
                     order_detail_id: userData.order_detail_id || null,
