@@ -74,32 +74,6 @@ function initializeNavigation() {
     });
 }
 
-function formatDateForInput(dateStr) {
-    if (!dateStr) return '';
-    
-    const [datePart, timePart] = dateStr.split(' ');
-    if (!datePart || !timePart) return '';
-    
-    const [year, month, day] = datePart.split('-');
-    const [hours, minutes] = timePart.split(':');
-    
-    return `${year}-${month}-${day}T${hours}:${minutes}`;
-}
-
-function formatDateFromInput(inputDate) {
-    if (!inputDate) return '';
-    
-    const date = new Date(inputDate);
-    const year = date.getFullYear();
-    const month = String(date.getMonth() + 1).padStart(2, '0');
-    const day = String(date.getDate()).padStart(2, '0');
-    const hours = String(date.getHours()).padStart(2, '0');
-    const minutes = String(date.getMinutes()).padStart(2, '0');
-    const seconds = String(date.getSeconds()).padStart(2, '0');
-    
-    return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
-}
-
 async function showPage(pageName) {
     const pages = document.querySelectorAll('.page');
     pages.forEach(page => page.classList.remove('active'));
@@ -744,7 +718,9 @@ async function populateUsers() {
     showLoading();
     const users = await window.electronAPI.getUsers();
     const tbody = document.getElementById('users-tbody');
+    const areas = await window.electronAPI.getAreas();
     const userDataPath = await window.electronAPI.getUserDataPath();
+    const areaMap = new Map(areas.map(area => [area.id.toString(), area.name]));
 
     if (!tbody) {
         console.error("users-tbody not found in DOM");
@@ -785,17 +761,14 @@ async function populateUsers() {
                     ${user.name}
                 </div>
             </td>
-            <td>${user.order_detail_id || 'N/A'}</td>
-            <td>${user.order_id || 'N/A'}</td>
-            <td>${formatDate(user.expired_date_out)}</td>
+            <td>${user.order_detail_id}</td>
+            <td>${user.order_id}</td>
+            <td>${user.expired_date_out}</td>
             <td><span class="status-badge ${statusClass}">${user.status}</span></td>
             <td>
                 <div class="action-buttons">
                     <button class="btn-icon btn-view" onclick="viewUser('${user.id}')" title="View User">
                         <i class="fas fa-eye"></i>
-                    </button>
-                    <button class="btn-icon btn-edit" onclick="openEditUserModal('${user.id}')" title="Edit User">
-                        <i class="fas fa-edit"></i>
                     </button>
                     <button class="btn-icon btn-delete" onclick="deleteUser('${user.id}')" title="Delete User">
                         <i class="fas fa-trash"></i>
@@ -808,6 +781,7 @@ async function populateUsers() {
     }).join('');
     hideLoading();
 }
+
 async function syncUserToDevices(userId) {
     const btn = document.getElementById(`sync-btn-${userId}`);
     const originalIcon = btn.innerHTML;
@@ -988,8 +962,6 @@ async function openEditUserModal(userId) {
     }
 
     currentEditingUser = user;
-
-    console.log(user)
     
     document.getElementById('edit-user-id').value = user.id;
     document.getElementById('edit-user-name').value = user.name;
@@ -1011,7 +983,7 @@ async function updateUser() {
     const expiredIn = document.getElementById('edit-user-expired-in').value;
     const expiredOut = document.getElementById('edit-user-expired-out').value;
 
-    if (!expiredOut) {
+    if (!name || !startDate || !expiredIn || !expiredOut) {
         showNotification('Please fill all required fields!', 'error');
         updateBtn.disabled = false;
         updateBtn.innerHTML = '<i class="fas fa-save"></i> Update User';

@@ -260,7 +260,15 @@ async function getImageBase64(url) {
     }
 }
 
-// All-in-one function to perform login and sync
+// Helper function to check if photo needs update
+function needsPhotoUpdate(existingPhotoPath, newImageUrl) {
+    if (!newImageUrl) return false;
+    if (!existingPhotoPath) return true;
+    // Could add more sophisticated checking here (e.g., comparing timestamps)
+    return true;
+}
+
+// Updated performLoginAndSync function for main.js
 async function performLoginAndSync() {
     const now = new Date();
     console.log("Starting login and sync process...");
@@ -297,30 +305,135 @@ async function performLoginAndSync() {
         const token = rawToken.includes("|") ? rawToken.split("|")[1].trim() : rawToken.trim();
         console.log("Login successful, token obtained.");
 
-        // 2. Fetch user data
+        // 2. Fetch turnstile order details
         const syncResponse = await axios.get(
             `${apiSettings.BACKOFFICE_API_URL}/turnstile-order-details?store_id=${encodeURIComponent(apiSettings.STORE_ID)}`,
             { headers: { Authorization: `Bearer ${token}`, Accept: "application/json" } }
         );
 
-        const userDataList = syncResponse.data?.data || [];
-        if (!userDataList.length) return { success: true, message: "No new users to sync." };
-        console.log(`Found ${userDataList.length} users to sync.`);
+        const turnstileDataList = syncResponse.data?.data || [];
+        if (!turnstileDataList.length) {
+            console.log("No turnstile data to sync.");
+            return { success: true, message: "No new users to sync." };
+        }
+        console.log(`Found ${turnstileDataList.length} turnstile records to process.`);
 
-        // 3. Process each user
+        // 3. Get existing users from database
+        const existingUsers = await new Promise((resolve, reject) => {
+            db.all("SELECT id FROM users", [], (err, rows) => {
+                if (err) reject(err);
+                else resolve(rows.map(row => row.id));
+            });
+        });
+
+        const existingUserIds = new Set(existingUsers);
+        console.log(`Existing user IDs in database: ${existingUserIds.size}`);
+
+        // 4. Track updates needed for API
+        const turnstileUpdates = [];
+
+        // 5. Process each turnstile record
         const results = await Promise.all(
-            userDataList.map(async (apiUserData) => {
+            turnstileDataList.map(async (turnstileData) => {
+                let entryId = turnstileData.entry_id;
+                let needsUpdate = false;
+
+                // Check if entry_id is null or doesn't exist in DB
+                if (!entryId) {
+                    // Generate new entry_id
+                    entryId = generateUniqueId();
+                    needsUpdate = true;
+                    console.log(`Generated new entry_id: ${entryId} for turnstile_order_detail_id: ${turnstileData.turnstile_order_detail_id}`);
+                } else if (existingUserIds.has(entryId)) {
+                    // User already exists, check if image needs update
+                    console.log(`User with entry_id ${entryId} already exists. Checking for image updates...`);
+                    
+                    const existingUser = await new Promise((resolve, reject) => {
+                        db.get("SELECT * FROM users WHERE id = ?", [entryId], (err, row) => {
+                            if (err) reject(err);
+                            else resolve(row);
+                        });
+                    });
+
+                    // Check if image needs update
+                    if (turnstileData.image) {
+                        let base64Image = null;
+                        let photoPath = null;
+
+                        const imgBase64 = await getImageBase64(turnstileData.image);
+                        if (imgBase64) {
+                            const cleanBase64 = imgBase64.replace(/^data:image\/\w+;base64,/, "");
+                            base64Image = cleanBase64;
+                            
+                            try {
+                                const buffer = Buffer.from(cleanBase64, "base64");
+                                const fileName = `${turnstileData.turnstile_order_detail_id}_${Date.now()}.jpg`;
+                                const uploadsDir = path.join(app.getPath("userData"), "uploads");
+                                fs.mkdirSync(uploadsDir, { recursive: true });
+                                const fullPath = path.join(uploadsDir, fileName);
+                                fs.writeFileSync(fullPath, buffer);
+                                photoPath = path.join("uploads", fileName);
+
+                                // Delete old photo if exists
+                                if (existingUser.photo) {
+                                    deletePhotoFile(existingUser.photo);
+                                }
+
+                                // Update photo in database
+                                await new Promise((resolve, reject) => {
+                                    db.run(
+                                        "UPDATE users SET photo = ? WHERE id = ?",
+                                        [photoPath, entryId],
+                                        function(err) {
+                                            if (err) reject(err);
+                                            else resolve({ changes: this.changes });
+                                        }
+                                    );
+                                });
+
+                                // Update user on devices with new photo
+                                const userForDevice = {
+                                    ...existingUser,
+                                    photo: photoPath,
+                                    base64: base64Image
+                                };
+                                await addUserToAllDevices(userForDevice);
+                                
+                                console.log(`Updated photo for user ${entryId}`);
+                            } catch (err) {
+                                console.error("Error updating photo:", err.message);
+                            }
+                        }
+                    }
+
+                    return { 
+                        entryId, 
+                        skipped: true, 
+                        message: "User already exists, image checked/updated" 
+                    };
+                }
+
+                // Prepare turnstile update data if needed
+                if (needsUpdate) {
+                    turnstileUpdates.push({
+                        turnstile_order_detail_id: turnstileData.turnstile_order_detail_id,
+                        order_detail_id: turnstileData.order_detail_id,
+                        entry_id: entryId
+                    });
+                }
+
+                // Download and save image
                 let base64Image = null;
                 let photoPath = null;
 
-                if (apiUserData.image) {
-                    const imgBase64 = await getImageBase64(apiUserData.image);
+                if (turnstileData.image) {
+                    const imgBase64 = await getImageBase64(turnstileData.image);
                     if (imgBase64) {
                         const cleanBase64 = imgBase64.replace(/^data:image\/\w+;base64,/, "");
                         base64Image = cleanBase64;
                         try {
                             const buffer = Buffer.from(cleanBase64, "base64");
-                            const fileName = `${apiUserData.order_detail_id}_${Date.now()}.jpg`;
+                            const fileName = `${turnstileData.turnstile_order_detail_id}_${Date.now()}.jpg`;
                             const uploadsDir = path.join(app.getPath("userData"), "uploads");
                             fs.mkdirSync(uploadsDir, { recursive: true });
                             const fullPath = path.join(uploadsDir, fileName);
@@ -333,32 +446,70 @@ async function performLoginAndSync() {
                     }
                 }
 
+                // Create user object
                 const user = {
-                    id: generateUniqueId(),
-                    name: `User-${apiUserData.order_detail_id}`,
+                    id: entryId,
+                    name: `User-${turnstileData.order_detail_id}`,
                     email: null,
                     role: "guest",
                     area: "default",
                     status: "Paid",
                     photo: photoPath,
                     base64: base64Image,
-                    order_detail_id: apiUserData.order_detail_id,
-                    order_id: apiUserData.order_detail_id.toString(),
-                    start_date: "",
-                    expired_date_in: "",
-                    expired_date_out: "",
+                    order_detail_id: turnstileData.order_detail_id,
+                    order_id: turnstileData.order_detail_id.toString(),
+                    start_date: formatDateForDevice(turnstileData.entry_at),
+                    expired_date_in: formatDateForDevice(turnstileData.entry_at),
+                    expired_date_out: formatDateForDevice(turnstileData.entry_at),
                 };
 
+                // Add to database
                 const dbResult = await addUserToDB(user);
+                
+                // Add to devices
                 const deviceResults = await addUserToAllDevices(user);
 
                 console.log(`Processed user ${user.name}:`, { dbResult, deviceResults });
 
-                return { dbResult, deviceResults, success: true };
+                return { 
+                    entryId, 
+                    dbResult, 
+                    deviceResults, 
+                    success: true,
+                    needsUpdate 
+                };
             })
         );
 
-        return { success: true, message: "Sync completed.", results };
+        // 6. Update entry_ids back to API if there are any
+        if (turnstileUpdates.length > 0) {
+            console.log(`Updating ${turnstileUpdates.length} entry_ids back to API...`);
+            try {
+                const updateResponse = await axios.post(
+                    `${apiSettings.BACKOFFICE_API_URL}/turnstile-order-details`,
+                    { turnstileData: turnstileUpdates },
+                    { 
+                        headers: { 
+                            Authorization: `Bearer ${token}`, 
+                            "Content-Type": "application/json" 
+                        } 
+                    }
+                );
+                console.log("API update response:", updateResponse.data);
+            } catch (updateErr) {
+                console.error("Failed to update entry_ids to API:", updateErr.response?.data || updateErr.message);
+            }
+        }
+
+        const newUsers = results.filter(r => !r.skipped).length;
+        const skippedUsers = results.filter(r => r.skipped).length;
+
+        return { 
+            success: true, 
+            message: `Sync completed. New users: ${newUsers}, Skipped: ${skippedUsers}`,
+            results 
+        };
+
     } catch (err) {
         console.error("Sync error details:", {
             status: err.response?.status,
@@ -368,7 +519,6 @@ async function performLoginAndSync() {
         throw new Error("Sync failed. Check logs for details.");
     }
 }
-
 
 function startApiServer() {
     const appServer = express();
@@ -771,6 +921,178 @@ ipcMain.handle('addUserToDevices', async (event, userId) => {
     } catch (err) {
         console.error('Error in addUserToDevices:', err);
         throw new Error(err.message);
+    }
+});
+
+ipcMain.handle('db:updateUser', async (event, user) => {
+    try {
+        const { id, name, start_date, expired_date_in, expired_date_out } = user;
+        
+        // Step 1: Update in database
+        await new Promise((resolve, reject) => {
+            db.run(
+                `UPDATE users SET name = ?, start_date = ?, expired_date_in = ?, expired_date_out = ? WHERE id = ?`,
+                [name, start_date, expired_date_in, expired_date_out, id],
+                function(err) {
+                    if (err) {
+                        console.error('Error updating user in database:', err);
+                        reject(err);
+                    } else {
+                        console.log(`✅ Updated user ${id} in database, rows affected: ${this.changes}`);
+                        resolve({ changes: this.changes });
+                    }
+                }
+            );
+        });
+
+        // Step 2: Get full user data from database (including photo)
+        const fullUser = await new Promise((resolve, reject) => {
+            db.get("SELECT * FROM users WHERE id = ?", [id], (err, row) => {
+                if (err) {
+                    console.error('Error fetching user from database:', err);
+                    reject(err);
+                } else {
+                    resolve(row);
+                }
+            });
+        });
+
+        if (!fullUser) {
+            throw new Error('User not found after update');
+        }
+
+        // Step 3: Prepare base64 image if photo exists
+        let base64Image = null;
+        if (fullUser.photo) {
+            const fullPath = path.join(app.getPath('userData'), fullUser.photo);
+            if (fs.existsSync(fullPath)) {
+                base64Image = fs.readFileSync(fullPath).toString('base64');
+                console.log('📸 Photo loaded for device sync');
+            }
+        }
+
+        // Step 4: Sync to all devices
+        const devices = await new Promise((resolve, reject) => {
+            db.all("SELECT id, ip FROM devices", [], (err, rows) => {
+                if (err) {
+                    console.error('Error fetching devices:', err);
+                    reject(err);
+                } else {
+                    resolve(rows);
+                }
+            });
+        });
+
+        if (devices.length === 0) {
+            console.log('⚠️ No devices found to sync');
+            return { 
+                success: true, 
+                dbChanges: 1,
+                deviceResults: [],
+                message: 'User updated in database, but no devices to sync'
+            };
+        }
+
+        console.log(`🔄 Syncing updated user to ${devices.length} device(s)...`);
+
+        const deviceResults = [];
+
+        for (const device of devices) {
+            const url = `http://${device.ip}:9090/addDeviceWhiteList`;
+
+            try {
+                // Check device status
+                const status = await getDeviceStatus(device.ip);
+                
+                if (status === "online") {
+                    // Prepare request payload
+                    const payload = {
+                        totalnum: 1,
+                        pass: apiSettings.DEVICE_PASS,
+                        currentnum: 1,
+                        data: {
+                            usertype: "white",
+                            name: fullUser.name,
+                            idno: fullUser.id,
+                            icno: fullUser.id,
+                            peoplestartdate: fullUser.start_date || "",
+                            peopleenddate: fullUser.expired_date_out || "",
+                        }
+                    };
+
+                    // Add image if present
+                    if (base64Image && base64Image.trim() !== "") {
+                        payload.data.picData1 = base64Image;
+                    } else {
+                        // Add passAlgo if image is missing
+                        payload.data.passAlgo = true;
+                    }
+
+                    console.log(`📤 Sending update to device ${device.ip}:`, {
+                        name: payload.data.name,
+                        idno: payload.data.idno,
+                        hasPhoto: !!payload.data.picData1
+                    });
+
+                    const response = await axios.post(url, payload);
+                    
+                    deviceResults.push({
+                        device: device.ip,
+                        result: response.data.result,
+                        message: response.data.message,
+                        success: response.data.result === 0
+                    });
+
+                    if (response.data.result === 0) {
+                        console.log(`✅ Successfully synced to device ${device.ip}`);
+                    } else {
+                        console.log(`⚠️ Device ${device.ip} returned non-zero result: ${response.data.message}`);
+                    }
+                } else {
+                    deviceResults.push({
+                        device: device.ip,
+                        result: -1,
+                        message: "Device is offline, skipping.",
+                        success: false
+                    });
+                    console.log(`⚠️ Device ${device.ip} is offline, skipping sync`);
+                }
+            } catch (error) {
+                deviceResults.push({
+                    device: device.ip,
+                    result: -1,
+                    message: `API call failed: ${error.message}`,
+                    success: false
+                });
+                console.error(`❌ Failed to sync to device ${device.ip}:`, error.message);
+            }
+        }
+
+        // Count successful syncs
+        const successfulSyncs = deviceResults.filter(r => r.success).length;
+        const totalDevices = devices.length;
+
+        console.log(`✅ Sync complete: ${successfulSyncs}/${totalDevices} devices updated successfully`);
+
+        return {
+            success: true,
+            dbChanges: 1,
+            deviceResults: deviceResults,
+            syncSummary: {
+                total: totalDevices,
+                successful: successfulSyncs,
+                failed: totalDevices - successfulSyncs
+            },
+            message: `User updated in database and synced to ${successfulSyncs}/${totalDevices} devices`
+        };
+
+    } catch (error) {
+        console.error('❌ Error in db:updateUser:', error);
+        return {
+            success: false,
+            message: error.message,
+            error: error
+        };
     }
 });
 

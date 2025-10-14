@@ -80,13 +80,7 @@
                             <p class="stat-number" id="total-areas">8</p>
                         </div>
                     </div>
-                    
                 </div>
-                <!-- <div class="recent-activities">
-                    <h3>Recent Activities</h3>
-                    <div class="activity-list" id="activity-list">
-                    </div>
-                </div> -->
             </div>
 
             <div id="users-page" class="page">
@@ -102,10 +96,10 @@
                         <button class="btn btn-primary" onclick="openAddUserModal()">
                             <i class="fas fa-plus"></i> Add User
                         </button>
-                          <button class="btn btn-danger" onclick="bulkDeleteUsers()">Delete Selected</button>
-                          <button class="btn btn-primary" onclick="syncApi()">
-                              <i class="fas fa-cloud-download-alt"></i> API Sync
-                          </button>
+                        <button class="btn btn-danger" onclick="bulkDeleteUsers()">Delete Selected</button>
+                        <button class="btn btn-primary" onclick="syncApi()">
+                            <i class="fas fa-cloud-download-alt"></i> API Sync
+                        </button>
                     </div>
                 </div>
                 <div class="table-container">
@@ -197,66 +191,49 @@
             <div id="settings-page" class="page">
                 <div class="settings-container">
                     <div class="settings-section">
-                        <h3>API Configuration</h3>
+                        <h3><i class="fas fa-server"></i> API Configuration</h3>
                         <div class="form-group">
-                            <label for="backoffice-api-url">Backoffice API URL</label>
+                            <label for="backoffice-api-url">
+                                <i class="fas fa-link"></i> Backoffice API URL
+                            </label>
                             <input type="text" id="backoffice-api-url" class="form-control" placeholder="https://api.yourcompany.com/api">
+                            <small class="form-text">Base URL for the backoffice API endpoint</small>
                         </div>
                         <div class="form-group">
-                            <label for="sync-api-url">Sync API URL</label>
-                            <input type="text" id="sync-api-url" class="form-control" placeholder="https://api.yourcompany.com/api">
-                        </div>
-                        <div class="form-group">
-                            <label for="device-password">Device Password</label>
+                            <label for="device-password">
+                                <i class="fas fa-key"></i> Device Password
+                            </label>
                             <input type="password" id="device-password" class="form-control" placeholder="Enter device password">
+                            <small class="form-text">Default password for connecting to gate devices</small>
                         </div>
                     </div>
                     
                     <div class="settings-section">
-                        <h3>API Credentials</h3>
+                        <h3><i class="fas fa-user-lock"></i> API Credentials</h3>
                         <div class="form-group">
-                            <label for="api-email">Email</label>
+                            <label for="api-email">
+                                <i class="fas fa-envelope"></i> Email
+                            </label>
                             <input type="email" id="api-email" class="form-control" placeholder="Enter API email">
+                            <small class="form-text">Email for API authentication</small>
                         </div>
                         <div class="form-group">
-                            <label for="api-password">Password</label>
+                            <label for="api-password">
+                                <i class="fas fa-lock"></i> Password
+                            </label>
                             <input type="password" id="api-password" class="form-control" placeholder="Enter API password">
+                            <small class="form-text">Password for API authentication</small>
                         </div>
                     </div>
+
                     <div class="settings-section">
-                        <h3>System Settings</h3>
+                        <h3><i class="fas fa-store"></i> Store Configuration</h3>
                         <div class="form-group">
-                            <label for="store-name">Store/Company Name</label>
-                            <input type="text" id="store-name" class="form-control" placeholder="Enter company name">
-                        </div>
-                        <div class="form-group">
-                            <label for="timezone">Timezone</label>
-                            <select id="timezone" class="form-control">
-                                <option value="UTC">UTC</option>
-                                <option value="America/New_York">Eastern Time</option>
-                                <option value="America/Los_Angeles">Pacific Time</option>
-                                <option value="Europe/London">London</option>
-                                <option value="Asia/Kuala_Lumpur">Kuala Lumpur</option>
-                                <option value="Asia/Tokyo">Tokyo</option>
-                            </select>
-                        </div>
-                    </div>
-            
-                    <div class="settings-section">
-                        <h3>Security Settings</h3>
-                        <div class="form-group">
-                            <label class="checkbox-label">
-                                <input type="checkbox" id="enable-2fa">
-                                <span class="checkmark"></span>
-                                Enable Two-Factor Authentication
+                            <label for="store-id">
+                                <i class="fas fa-hashtag"></i> Store ID
                             </label>
-                        </div>
-                        <div class="form-group">
-                            <label class="checkbox-label">
-                                <input type="checkbox" id="enable-logging">
-                                <span class="checkmark"></span>
-                                Enable Access Logging
-                            </label>
+                            <input type="text" id="store-id" class="form-control" placeholder="Enter store ID">
+                            <small class="form-text">Unique identifier for this store location</small>
                         </div>
                     </div>
             
@@ -305,9 +282,6 @@
                             <label for="user-area">Area Access</label>
                             <select id="user-area" class="form-control" required>
                                 <option value="">Select Area</option>
-                                <option value="lobby">Main Lobby</option>
-                                <option value="office">Office Floor</option>
-                                <option value="warehouse">Warehouse</option>
                             </select>
                         </div>
                     </div>
@@ -348,6 +322,57 @@
                 <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
                 <button id="save-user-btn" class="btn btn-primary" onclick="saveUser()">
                     <i class="fas fa-save"></i> Save User
+                </button>
+            </div>
+        </div>
+
+        <div id="edit-user-modal" class="modal">
+            <div class="modal-header">
+                <h3><i class="fas fa-user-edit"></i> Edit User Time</h3>
+                <button class="modal-close" onclick="closeModal()">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="modal-body">
+                <form id="edit-user-form">
+                    <input type="hidden" id="edit-user-id">
+                    
+                    <div class="form-group">
+                        <label for="edit-user-name">
+                            <i class="fas fa-user"></i> Full Name
+                        </label>
+                        <input type="text" id="edit-user-name" class="form-control" required>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="edit-user-start-date">
+                            <i class="fas fa-calendar-check"></i> Start Date & Time
+                        </label>
+                        <input type="datetime-local" id="edit-user-start-date" class="form-control" required>
+                        <small class="form-text">When the user's access begins</small>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="edit-user-expired-in">
+                            <i class="fas fa-sign-in-alt"></i> Entry Expiry Date & Time
+                        </label>
+                        <input type="datetime-local" id="edit-user-expired-in" class="form-control" required>
+                        <small class="form-text">When entry access expires</small>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="edit-user-expired-out">
+                            <i class="fas fa-sign-out-alt"></i> Exit Expiry Date & Time
+                        </label>
+                        <input type="datetime-local" id="edit-user-expired-out" class="form-control" required>
+                        <small class="form-text">When exit access expires</small>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                <button id="update-user-btn" class="btn btn-primary" onclick="updateUser()">
+                    <i class="fas fa-save"></i> Update & Sync to Devices
                 </button>
             </div>
         </div>
@@ -431,9 +456,6 @@
                         <label for="device-area">Assigned Area</label>
                         <select id="device-area" class="form-control" required>
                             <option value="">Select Area</option>
-                            <option value="lobby">Main Lobby</option>
-                            <option value="office">Office Floor</option>
-                            <option value="warehouse">Warehouse</option>
                         </select>
                     </div>
                 </form>
