@@ -225,7 +225,7 @@
                             <small class="form-text">Password for API authentication</small>
                         </div>
                     </div>
-
+            
                     <div class="settings-section">
                         <h3><i class="fas fa-store"></i> Store Configuration</h3>
                         <div class="form-group">
@@ -234,6 +234,13 @@
                             </label>
                             <input type="text" id="store-id" class="form-control" placeholder="Enter store ID">
                             <small class="form-text">Unique identifier for this store location</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="entry-time-limit">
+                                <i class="fas fa-clock"></i> Entry Time Limit (Hours)
+                            </label>
+                            <input type="number" id="entry-time-limit" class="form-control" placeholder="2" min="1" max="24" step="0.5">
+                            <small class="form-text">Time allowed between entry and exit (in hours). Default: 2 hours</small>
                         </div>
                     </div>
             

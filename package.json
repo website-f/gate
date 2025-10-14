@@ -5,44 +5,87 @@
   "scripts": {
     "start": "electron .",
     "build": "electron-builder",
+    "build:win": "electron-builder --win",
+    "build:mac": "electron-builder --mac",
+    "build:linux": "electron-builder --linux",
+    "rebuild": "electron-rebuild -f -w sqlite3",
+    "postinstall": "electron-builder install-app-deps",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
-  "author": "",
+  "author": "Your Name",
   "license": "ISC",
-  "description": "",
+  "description": "Gate Controller System",
   "devDependencies": {
-    "axios": "^1.11.0",
     "electron": "^37.3.1",
     "electron-builder": "^26.0.12",
-    "electron-rebuild": "^3.2.9",
-    "sqlite3": "^5.1.7"
+    "electron-rebuild": "^3.2.9"
   },
   "dependencies": {
+    "axios": "^1.11.0",
     "body-parser": "^2.2.0",
     "cors": "^2.8.5",
-    "express": "^5.1.0"
+    "express": "^5.1.0",
+    "sqlite3": "^5.1.7"
   },
   "build": {
-    "appId": "com.yourname.gateadmin",
-    "productName": "GateAdmin",
+    "appId": "com.gateadmin.app",
+    "productName": "Gate Controller System",
     "directories": {
-      "output": "dist"
+      "output": "dist",
+      "buildResources": "build"
     },
     "files": [
       "**/*",
+      "!**/*.{iml,o,hprof,orig,pyc,pyo,rbc,swp,csproj,sln,xproj}",
+      "!.editorconfig",
+      "!**/._*",
+      "!**/{.DS_Store,.git,.hg,.svn,CVS,RCS,SCCS,.gitignore,.gitattributes}",
+      "!**/{__pycache__,thumbs.db,.flowconfig,.idea,.vs,.nyc_output}",
+      "!**/{appveyor.yml,.travis.yml,circle.yml}",
+      "!**/{npm-debug.log,yarn.lock,.yarn-integrity,.yarn-metadata.json}",
       "!node_modules/*/{CHANGELOG.md,README.md,README,readme.md,readme}",
-      "!**/*.map"
+      "!**/*.map",
+      "!dist",
+      "!.vscode"
+    ],
+    "extraResources": [
+      {
+        "from": "node_modules/sqlite3/build/Release",
+        "to": "sqlite3",
+        "filter": ["**/*"]
+      }
     ],
     "win": {
       "target": [
-        "nsis"
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
       ],
-      "icon": "build/icon.ico"
+      "icon": "build/icon.ico",
+      "artifactName": "${productName}-Setup-${version}.${ext}"
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "allowElevation": true,
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "installerHeaderIcon": "build/icon.ico",
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Gate Controller System"
+    },
+    "mac": {
+      "target": ["dmg"],
+      "icon": "build/icon.icns",
+      "category": "public.app-category.business"
+    },
+    "linux": {
+      "target": ["AppImage"],
+      "icon": "build/icon.png",
+      "category": "Utility"
     }
   }
 }

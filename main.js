@@ -121,6 +121,10 @@ function loadSettings() {
             apiSettings.STORE_ID = "1"; // default
             db.run("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", ['STORE_ID', apiSettings.STORE_ID]);
         }
+        if (!apiSettings.ENTRY_TIME_LIMIT) {
+            apiSettings.ENTRY_TIME_LIMIT = "2"; // default 2 hours
+            db.run("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", ['ENTRY_TIME_LIMIT', apiSettings.ENTRY_TIME_LIMIT]);
+        }
 
         startApiServer();
     });
@@ -260,7 +264,6 @@ async function getImageBase64(url) {
     }
 }
 
-// Helper function to check if photo needs update
 function needsPhotoUpdate(existingPhotoPath, newImageUrl) {
     if (!newImageUrl) return false;
     if (!existingPhotoPath) return true;
@@ -446,6 +449,11 @@ async function performLoginAndSync() {
                     }
                 }
 
+                // Calculate expiry dates
+                const entryDate = new Date(turnstileData.entry_at);
+                const entryTimeLimitHours = parseInt(apiSettings.ENTRY_TIME_LIMIT) || 2;
+                const exitDate = new Date(entryDate.getTime() + (entryTimeLimitHours * 60 * 60 * 1000));
+
                 // Create user object
                 const user = {
                     id: entryId,
@@ -460,7 +468,7 @@ async function performLoginAndSync() {
                     order_id: turnstileData.order_detail_id.toString(),
                     start_date: formatDateForDevice(turnstileData.entry_at),
                     expired_date_in: formatDateForDevice(turnstileData.entry_at),
-                    expired_date_out: formatDateForDevice(turnstileData.entry_at),
+                    expired_date_out: formatDateForDevice(exitDate),
                 };
 
                 // Add to database

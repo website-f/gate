@@ -690,7 +690,6 @@ async function saveDevice() {
 }
 
 // Settings functionality
-// Settings functionality
 async function loadSettingsPage() {
     showLoading();
     try {
@@ -700,6 +699,7 @@ async function loadSettingsPage() {
         document.getElementById('api-email').value = settings.API_EMAIL || '';
         document.getElementById('api-password').value = settings.API_PASSWORD || '';
         document.getElementById('store-id').value = settings.STORE_ID || '';
+        document.getElementById('entry-time-limit').value = settings.ENTRY_TIME_LIMIT || '2';
 
         showNotification('Settings loaded successfully!');
     } catch (error) {
@@ -716,9 +716,18 @@ async function saveSettings() {
     const apiEmail = document.getElementById('api-email').value;
     const apiPassword = document.getElementById('api-password').value;
     const storeId = document.getElementById('store-id').value;
+    const entryTimeLimit = document.getElementById('entry-time-limit').value;
 
+    // Validation
     if (!backofficeApiUrl || !devicePassword || !apiEmail || !apiPassword || !storeId) {
         showNotification('Please fill all required fields!', 'error');
+        return;
+    }
+
+    // Validate entry time limit
+    const timeLimitNum = parseFloat(entryTimeLimit);
+    if (!entryTimeLimit || isNaN(timeLimitNum) || timeLimitNum < 0.5 || timeLimitNum > 24) {
+        showNotification('Entry time limit must be between 0.5 and 24 hours!', 'error');
         return;
     }
 
@@ -729,6 +738,7 @@ async function saveSettings() {
         await window.electronAPI.setSetting('API_EMAIL', apiEmail);
         await window.electronAPI.setSetting('API_PASSWORD', apiPassword);
         await window.electronAPI.setSetting('STORE_ID', storeId);
+        await window.electronAPI.setSetting('ENTRY_TIME_LIMIT', entryTimeLimit);
 
         showNotification('Settings saved successfully!');
     } catch (error) {
