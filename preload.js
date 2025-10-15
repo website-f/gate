@@ -1,4 +1,4 @@
-// preload.js
+// preload.js - Complete updated version
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('electronAPI', {
@@ -10,21 +10,21 @@ contextBridge.exposeInMainWorld('electronAPI', {
     restartDevice: (deviceId) => ipcRenderer.invoke('api:restartDevice', deviceId),
     
     performSync: () => ipcRenderer.invoke('api:performSync'),
-    addUserToDevices: (userId) => ipcRenderer.invoke('addUserToDevices', userId),
-    updateUserStatus: (userId, status) => ipcRenderer.invoke('updateUserStatus', userId, status),
+    addUserToDevices: (recordId) => ipcRenderer.invoke('addUserToDevices', recordId),
+    updateUserStatus: (recordId, status) => ipcRenderer.invoke('updateUserStatus', recordId, status),
     
     // File System Handlers
     savePhoto: (photoData) => ipcRenderer.invoke('fs:savePhoto', photoData),
     deletePhoto: (path) => ipcRenderer.invoke('fs:deletePhoto', path),
     getUserDataPath: () => ipcRenderer.invoke('app:getUserDataPath'),
     
-    // SQLite DB handlers
+    // SQLite DB handlers - now with record_id support
     getUsers: () => ipcRenderer.invoke('db:getUsers'),
     addUser: (user) => ipcRenderer.invoke('db:addUser', user),
     updateUser: (user) => ipcRenderer.invoke('db:updateUser', user),
-    deleteUser: (id) => ipcRenderer.invoke('db:deleteUser', id),
+    deleteUser: (recordId) => ipcRenderer.invoke('db:deleteUser', recordId),
     
-    bulkDeleteUsers: (ids) => ipcRenderer.invoke('db:bulkDeleteUsers', ids),
+    bulkDeleteUsers: (recordIds) => ipcRenderer.invoke('db:bulkDeleteUsers', recordIds),
     
     getSettings: () => ipcRenderer.invoke('db:getSettings'),
     setSetting: (key, value) => ipcRenderer.invoke('db:setSetting', key, value),

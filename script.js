@@ -749,6 +749,20 @@ async function saveSettings() {
     }
 }
 
+function isExpired(dateStr) {
+    if (!dateStr) return false;
+    const [datePart, timePart] = dateStr.split(' ');
+    const [year, month, day] = datePart.split('-');
+    const [hours, minutes, seconds] = timePart ? timePart.split(':') : [0, 0, 0];
+    
+    const targetDate = new Date(year, month - 1, day, hours, minutes, seconds);
+    const now = new Date();
+    
+    // Compare based on actual timestamp
+    return targetDate.getTime() < now.getTime();
+}
+
+
 
 async function populateUsers() {
     showLoading();
@@ -768,58 +782,212 @@ async function populateUsers() {
         return;
     }
 
-    tbody.innerHTML = users.map(user => {
-        const statusClass = user.status === 'Paid' ? 'status-active' : 'status-inactive';
+
+    // Group users by entry_id (id)
+    const groupedUsers = {};
+    users.forEach(user => {
+        if (!groupedUsers[user.id]) {
+            groupedUsers[user.id] = [];
+        }
+        groupedUsers[user.id].push(user);
+    });
+
+    // Sort each group by entry_at descending (latest first) and mark latest
+    Object.keys(groupedUsers).forEach(entryId => {
+        groupedUsers[entryId].sort((a, b) => {
+            const dateA = new Date(a.entry_at || a.start_date);
+            const dateB = new Date(b.entry_at || b.start_date);
+            return dateB - dateA;
+        });
+    });
+
+    const rows = [];
+
+    Object.keys(groupedUsers).forEach(entryId => {
+        const userGroup = groupedUsers[entryId];
+        const latestUser = userGroup[0]; // The most recent entry
+        const entryCount = userGroup.length;
+
+       const isUserExpired = isExpired(latestUser.expired_date_out);
+let statusText = latestUser.status;
+let statusClass;
+
+if (isUserExpired) {
+    statusText = 'Expired';
+    statusClass = 'status-expired';
+} else if (latestUser.status === 'Paid') {
+    statusClass = 'status-active';
+} else if (latestUser.status === 'Unpaid') {
+    statusText = 'Unpaid';
+    statusClass = 'status-inactive';
+} else {
+    statusClass = 'status-inactive';
+}
         let userPhotoPath;
-        if (user.photo) {
-            userPhotoPath = `file://${userDataPath.replaceAll('\\', '/')}/${user.photo.replaceAll('\\', '/')}`;
+        if (latestUser.photo) {
+            userPhotoPath = `file://${userDataPath.replaceAll('\\', '/')}/${latestUser.photo.replaceAll('\\', '/')}`;
         } else {
             userPhotoPath = './defuser.jpg';
         }
 
-        const syncButton = user.status !== 'Paid' 
-        ? `<button class="btn-icon btn-sync" id="sync-btn-${user.id}" onclick="syncUserToDevices('${user.id}')" title="Sync to Device">
-               <i class="fas fa-sync-alt"></i>
-           </button>` 
-        : '';
+        const syncButton = latestUser.status !== 'Paid' 
+            ? `<button class="btn-icon btn-sync" id="sync-btn-${latestUser.record_id}" onclick="syncUserToDevices('${latestUser.record_id}')" title="Sync to Device">
+                   <i class="fas fa-sync-alt"></i>
+               </button>` 
+            : '';
 
-        return `
-        <tr>
+        // Badge to show multiple entries
+        const entryBadge = entryCount > 1 
+            ? `<span class="entry-count-badge" title="This person has ${entryCount} entries">${entryCount}x</span>` 
+            : '';
+
+        // Main row for the latest entry
+        rows.push(`
+        <tr class="user-group-main" data-entry-id="${entryId}">
             <td>
-                <input type="checkbox" class="user-checkbox" value="${user.id}">
+                <input type="checkbox" class="user-checkbox" value="${latestUser.record_id}">
             </td>
             <td>
                 <div style="display: flex; align-items: center; gap: 12px;">
-                    <img src="${userPhotoPath}" alt="${user.name}" 
+                    <img src="${userPhotoPath}" alt="${latestUser.name}" 
                           style="width: 40px; height: 40px; border-radius: 50%; object-fit: cover;">
-                    ${user.name}
+                    <div>
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <span>${latestUser.name}</span>
+                            ${entryBadge}
+                        </div>
+                        <small style="color: #6b7280; font-size: 0.75rem;">ID: ${entryId}</small>
+                    </div>
                 </div>
             </td>
-            <td>${user.order_detail_id || 'N/A'}</td>
-            <td>${user.order_id || 'N/A'}</td>
-            <td>${formatDate(user.expired_date_out)}</td>
-            <td><span class="status-badge ${statusClass}">${user.status}</span></td>
+             <td>${latestUser.order_detail_id || 'N/A'}</td>
+            <td>${latestUser.order_id || 'N/A'}</td>
+            <td>${formatDate(latestUser.expired_date_out)}</td>
+            <td><span class="status-badge ${statusClass}">${statusText}</span></td>
             <td>
                 <div class="action-buttons">
-                    <button class="btn-icon btn-view" onclick="viewUser('${user.id}')" title="View User">
+                    ${entryCount > 1 ? `<button class="btn-icon btn-expand" onclick="toggleUserHistory('${entryId}')" title="View History">
+                        <i class="fas fa-chevron-down"></i>
+                    </button>` : ''}
+                    <button class="btn-icon btn-view" onclick="viewUser('${latestUser.record_id}')" title="View User">
                         <i class="fas fa-eye"></i>
                     </button>
-                    <button class="btn-icon btn-edit" onclick="openEditUserModal('${user.id}')" title="Edit User">
+                    <button class="btn-icon btn-edit" onclick="openEditUserModal('${latestUser.record_id}')" title="Edit User">
                         <i class="fas fa-edit"></i>
                     </button>
-                    <button class="btn-icon btn-delete" onclick="deleteUser('${user.id}')" title="Delete User">
+                    <button class="btn-icon btn-delete" onclick="deleteUserGroup('${entryId}')" title="Delete All Entries">
                         <i class="fas fa-trash"></i>
                     </button>
-                     ${syncButton}
+                    ${syncButton}
                 </div>
             </td>
         </tr>
-        `;
-    }).join('');
+        `);
+
+        // Add hidden rows for history if there are multiple entries
+        if (entryCount > 1) {
+            userGroup.slice(1).forEach((historicalUser, index) => {
+                const historyPhotoPath = historicalUser.photo 
+                    ? `file://${userDataPath.replaceAll('\\', '/')}/${historicalUser.photo.replaceAll('\\', '/')}` 
+                    : './defuser.jpg';
+
+                rows.push(`
+                <tr class="user-history-row" data-entry-id="${entryId}" style="display: none; background-color: #f9fafb;">
+                    <td></td>
+                    <td>
+                        <div style="display: flex; align-items: center; gap: 12px; padding-left: 24px;">
+                            <img src="${historyPhotoPath}" alt="${historicalUser.name}" 
+                                  style="width: 32px; height: 32px; border-radius: 50%; object-fit: cover; opacity: 0.7;">
+                            <div>
+                                <span style="color: #6b7280; font-size: 0.875rem;">Previous Entry #${index + 1}</span>
+                            </div>
+                        </div>
+                    </td>
+                    <td style="color: #6b7280;">${historicalUser.order_id || 'N/A'}</td>
+                    <td style="color: #6b7280;">${historicalUser.order_detail_id || 'N/A'}</td>
+                    <td style="color: #6b7280;">${formatDate(historicalUser.entry_at)}</td>
+                    <td><span class="status-badge status-inactive">Old</span></td>
+                    <td>
+                        <div class="action-buttons">
+                            <button class="btn-icon btn-view" onclick="viewUser('${historicalUser.record_id}')" title="View Entry">
+                                <i class="fas fa-eye"></i>
+                            </button>
+                            <button class="btn-icon btn-delete" onclick="deleteUserEntry('${historicalUser.record_id}')" title="Delete This Entry">
+                                <i class="fas fa-trash"></i>
+                            </button>
+                        </div>
+                    </td>
+                </tr>
+                `);
+            });
+        }
+    });
+
+    tbody.innerHTML = rows.join('');
     hideLoading();
 }
-async function syncUserToDevices(userId) {
-    const btn = document.getElementById(`sync-btn-${userId}`);
+
+function toggleUserHistory(entryId) {
+    const historyRows = document.querySelectorAll(`tr.user-history-row[data-entry-id="${entryId}"]`);
+    const expandButton = document.querySelector(`tr.user-group-main[data-entry-id="${entryId}"] .btn-expand i`);
+    
+    historyRows.forEach(row => {
+        if (row.style.display === 'none') {
+            row.style.display = '';
+            if (expandButton) expandButton.className = 'fas fa-chevron-up';
+        } else {
+            row.style.display = 'none';
+            if (expandButton) expandButton.className = 'fas fa-chevron-down';
+        }
+    });
+}
+
+async function deleteUserGroup(entryId) {
+    const users = await window.electronAPI.getUsers();
+    const userGroup = users.filter(u => u.id === entryId);
+    
+    if (userGroup.length === 0) return;
+
+    const entryCount = userGroup.length;
+    const message = entryCount > 1 
+        ? `Delete all ${entryCount} entries for this person? This will remove them from all devices.`
+        : `Delete this user? This will remove them from all devices.`;
+
+    showConfirmationModal(
+        'Delete User',
+        message,
+        async () => {
+            // Delete from devices
+            const apiResults = await window.electronAPI.deleteUserFromAllDevices(entryId);
+            
+            // Delete all entries from database
+            const recordIds = userGroup.map(u => u.record_id);
+            await window.electronAPI.bulkDeleteUsers(recordIds);
+            
+            showNotification(`Deleted all entries for user ${entryId}`);
+            await populateUsers();
+            await updateStats();
+        }
+    );
+}
+
+// Delete single entry
+async function deleteUserEntry(recordId) {
+    showConfirmationModal(
+        'Delete Entry',
+        'Delete this specific entry? The user will remain in the system with other entries.',
+        async () => {
+            await window.electronAPI.deleteUser(recordId);
+            showNotification('Entry deleted successfully');
+            await populateUsers();
+            await updateStats();
+        }
+    );
+}
+
+
+async function syncUserToDevices(recordId) {
+    const btn = document.getElementById(`sync-btn-${recordId}`);
     const originalIcon = btn.innerHTML;
 
     // Show a preload/spinner
@@ -827,36 +995,77 @@ async function syncUserToDevices(userId) {
     btn.disabled = true;
 
     try {
-        // Pass only userId; main process will fetch user from DB
-        const deviceResults = await window.electronAPI.addUserToDevices(userId);
+        // Fetch the user from database
+        const users = await window.electronAPI.getUsers();
+        const user = users.find(u => u.record_id == recordId);
+        
+        if (!user) {
+            alert('User not found in database');
+            return;
+        }
+
+        console.log("Syncing user to devices:", user);
+
+        // Pass recordId to main process
+        const deviceResults = await window.electronAPI.addUserToDevices(recordId);
         console.log("Device sync results:", deviceResults);
 
-        // Check if any device returned result 0 (success)
-        const isSuccess = deviceResults.some(r => r.result === 0);
+        // Check if any device updated the ID due to duplicate detection
+        let updatedId = null;
+        let hasSuccess = false;
 
-        if (isSuccess) {
-            // Update user status in main process / DB
-            await window.electronAPI.updateUserStatus(userId, 'Paid');
+        for (const result of deviceResults) {
+            if (result.result === 0) {
+                hasSuccess = true;
+            }
+            
+            // Check if this result contains an updated ID from duplicate detection
+            if (result.retry && result.updatedId && result.result === 0) {
+                updatedId = result.updatedId;
+                console.log(`Duplicate detected! ID updated from ${result.originalId} to ${updatedId}`);
+            }
+        }
 
-            // Remove the sync button from UI instantly
-            btn.remove();
+        if (hasSuccess) {
+            // If ID was changed due to duplicate detection, update the database
+            if (updatedId && updatedId !== user.id) {
+                console.log(`Updating user ID in database from ${user.id} to ${updatedId}`);
+                
+                // Update the user's ID in the database
+                await window.electronAPI.updateUser({
+                    id: updatedId,
+                    name: user.name,
+                    start_date: user.start_date,
+                    expired_date_in: user.expired_date_in,
+                    expired_date_out: user.expired_date_out
+                });
 
-            alert(`User synced successfully and marked as Paid`);
+                showNotification(`User synced successfully! ID updated to ${updatedId} (duplicate face detected)`, 'success');
+            } else {
+                showNotification('User synced successfully and marked as Paid', 'success');
+            }
+
+            // Update user status to Paid
+            await window.electronAPI.updateUserStatus(recordId, 'Paid');
+
+            // Refresh the user list
             await populateUsers();
         } else {
-            alert(`Failed to sync user to devices`);
+            const errors = deviceResults
+                .filter(r => r.result !== 0)
+                .map(r => `${r.device}: ${r.message}`)
+                .join('\n');
+            
+            alert(`Failed to sync user to devices:\n${errors}`);
         }
     } catch (err) {
         console.error("Error syncing user:", err);
-        alert(`Failed to sync user`);
+        alert(`Failed to sync user: ${err.message}`);
     } finally {
         btn.innerHTML = originalIcon;
         btn.disabled = false;
     }
 }
-
-
-
 
 async function bulkDeleteUsers() {
     const checkboxes = document.querySelectorAll('.user-checkbox:checked');
@@ -907,13 +1116,17 @@ async function populateAreaDropdownForUser() {
     });
 }
 
-async function viewUser(userId) {
+async function viewUser(recordId) {
     const users = await window.electronAPI.getUsers();
-    const user = users.find(u => u.id == userId);
+    const user = users.find(u => u.record_id == recordId);
     if (!user) {
         showNotification("User not found!", "error");
         return;
     }
+
+    // Get all entries for this person
+    const allEntries = users.filter(u => u.id === user.id);
+    const entryCount = allEntries.length;
 
     currentUser = user;
     const userDataPath = await window.electronAPI.getUserDataPath();
@@ -923,6 +1136,14 @@ async function viewUser(userId) {
     } else {
         userPhotoPath = './defuser.jpg';
     }
+
+    const entryInfo = entryCount > 1 
+        ? `<div class="info-item">
+            <span class="info-label">Total Entries:&nbsp;</span>
+            <span class="info-value"> ${entryCount}</span>
+        </div>`
+        : '';
+
     const userDetails = document.getElementById('user-details');
     userDetails.innerHTML = `
         <div class="user-photo">
@@ -931,9 +1152,10 @@ async function viewUser(userId) {
         </div>
         <div class="user-info">
             <div class="info-item">
-                <span class="info-label">ID:&nbsp;</span>
+                <span class="info-label">Entry ID:&nbsp;</span>
                 <span class="info-value"> ${user.id}</span>
             </div>
+            ${entryInfo}
             <div class="info-item">
                 <span class="info-label">Full Name:&nbsp;</span>
                 <span class="info-value"> ${user.name}</span>
@@ -947,28 +1169,24 @@ async function viewUser(userId) {
                 <span class="info-value"> ${user.role}</span>
             </div>
             <div class="info-item">
-                <span class="info-label">Area Access:&nbsp;</span>
-                <span class="info-value"> ${user.area}</span>
-            </div>
-            <div class="info-item">
                 <span class="info-label">Status: &nbsp;</span>
                 <span class="status-badge status-${user.status === 'Paid' ? 'active' : 'inactive'}">${user.status}</span>
             </div>
             <div class="info-item">
-                <span class="info-label">Order Detail ID:&nbsp;</span>
-                <span class="info-value"> ${user.order_detail_id || 'N/A'}</span>
+                <span class="info-label">Order Turnstile ID:&nbsp;</span>
+                <span class="info-value"> ${user.order_turnstile_id || 'N/A'}</span>
             </div>
             <div class="info-item">
                 <span class="info-label">Order ID:&nbsp;</span>
                 <span class="info-value"> ${user.order_id || 'N/A'}</span>
             </div>
             <div class="info-item">
-                <span class="info-label">Start Date:&nbsp;</span>
-                <span class="info-value"> ${formatDate(user.start_date)}</span>
+                <span class="info-label">Entry At:&nbsp;</span>
+                <span class="info-value"> ${formatDate(user.entry_at)}</span>
             </div>
             <div class="info-item">
-                <span class="info-label">Expired Date (In):&nbsp;</span>
-                <span class="info-value"> ${formatDate(user.expired_date_in)}</span>
+                <span class="info-label">Start Date:&nbsp;</span>
+                <span class="info-value"> ${formatDate(user.start_date)}</span>
             </div>
             <div class="info-item">
                 <span class="info-label">Expired Date (Out):&nbsp;</span>
@@ -977,107 +1195,136 @@ async function viewUser(userId) {
         </div>
     `;
 
-    const toggleBtn = document.getElementById('toggle-user-btn');
-    if (user.status === 'active') {
-        toggleBtn.innerHTML = '<i class="fas fa-user-slash"></i> Disable User';
-        toggleBtn.className = 'btn btn-warning';
-    } else {
-        toggleBtn.innerHTML = '<i class="fas fa-user-check"></i> Enable User';
-        toggleBtn.className = 'btn btn-success';
-    }
-
     openModal('view-user-modal');
 }
 
-async function openEditUserModal(userId) {
-    const users = await window.electronAPI.getUsers();
-    const user = users.find(u => u.id == userId);
-    if (!user) {
-        showNotification("User not found!", "error");
-        return;
+async function openEditUserModal(recordId) {
+    try {
+        const users = await window.electronAPI.getUsers();
+        const user = users.find(u => u.record_id == recordId);
+        
+        if (!user) {
+            showNotification('User not found', 'error');
+            return;
+        }
+
+        // Set the user ID (entry_id, not record_id)
+        document.getElementById('edit-user-id').value = user.id;
+        
+        // Set the user name
+        document.getElementById('edit-user-name').value = user.name || '';
+        
+        // Convert dates to datetime-local format
+        if (user.start_date) {
+            const startDate = convertToDatetimeLocal(user.start_date);
+            document.getElementById('edit-user-start-date').value = startDate;
+        }
+        
+        if (user.expired_date_in) {
+            const expiredIn = convertToDatetimeLocal(user.expired_date_in);
+            document.getElementById('edit-user-expired-in').value = expiredIn;
+        }
+        
+        if (user.expired_date_out) {
+            const expiredOut = convertToDatetimeLocal(user.expired_date_out);
+            document.getElementById('edit-user-expired-out').value = expiredOut;
+        }
+
+        // Show the modal
+        document.getElementById('modal-overlay').classList.add('active');
+        document.getElementById('edit-user-modal').classList.add('active');
+    } catch (err) {
+        console.error('Error opening edit modal:', err);
+        showNotification('Failed to load user data', 'error');
     }
+}
 
-    currentEditingUser = user;
+// Helper function to convert date string to datetime-local format
+function convertToDatetimeLocal(dateString) {
+    if (!dateString) return '';
+    
+    // Handle format: "YYYY-MM-DD HH:mm:ss"
+    let date;
+    
+    if (dateString.includes('T')) {
+        // ISO format
+        date = new Date(dateString);
+    } else if (dateString.includes(' ')) {
+        // Format: "YYYY-MM-DD HH:mm:ss"
+        const [datePart, timePart] = dateString.split(' ');
+        const [year, month, day] = datePart.split('-');
+        const [hours, minutes] = timePart.split(':');
+        date = new Date(year, month - 1, day, hours, minutes);
+    } else {
+        date = new Date(dateString);
+    }
+    
+    if (isNaN(date.getTime())) {
+        return '';
+    }
+    
+    // Convert to YYYY-MM-DDTHH:mm format
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    const hours = String(date.getHours()).padStart(2, '0');
+    const minutes = String(date.getMinutes()).padStart(2, '0');
+    
+    return `${year}-${month}-${day}T${hours}:${minutes}`;
+}
 
-    console.log(user)
+// Helper function to convert datetime-local to device format
+function convertToDeviceFormat(datetimeLocal) {
+    if (!datetimeLocal) return '';
     
-    document.getElementById('edit-user-id').value = user.id;
-    document.getElementById('edit-user-name').value = user.name;
-    document.getElementById('edit-user-start-date').value = formatDateForInput(user.start_date);
-    document.getElementById('edit-user-expired-in').value = formatDateForInput(user.expired_date_in);
-    document.getElementById('edit-user-expired-out').value = formatDateForInput(user.expired_date_out);
+    const date = new Date(datetimeLocal);
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    const hours = String(date.getHours()).padStart(2, '0');
+    const minutes = String(date.getMinutes()).padStart(2, '0');
+    const seconds = String(date.getSeconds()).padStart(2, '0');
     
-    openModal('edit-user-modal');
+    return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
 }
 
 async function updateUser() {
-    const updateBtn = document.getElementById('update-user-btn');
-    updateBtn.disabled = true;
-    updateBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Updating...';
-
-    const userId = document.getElementById('edit-user-id').value;
-    const name = document.getElementById('edit-user-name').value;
-    const startDate = document.getElementById('edit-user-start-date').value;
-    const expiredIn = document.getElementById('edit-user-expired-in').value;
-    const expiredOut = document.getElementById('edit-user-expired-out').value;
-
-    if (!expiredOut) {
-        showNotification('Please fill all required fields!', 'error');
-        updateBtn.disabled = false;
-        updateBtn.innerHTML = '<i class="fas fa-save"></i> Update User';
-        return;
-    }
-
-    const updatedUser = {
-        id: userId,
-        name: name,
-        start_date: formatDateFromInput(startDate),
-        expired_date_in: formatDateFromInput(expiredIn),
-        expired_date_out: formatDateFromInput(expiredOut)
-    };
-
     try {
-        showLoading();
-        showNotification('Updating user in database and syncing to devices...', 'info');
-        
-        // Update in local database AND sync to all devices in one call
-        const result = await window.electronAPI.updateUser(updatedUser);
-        
-        console.log('Update result:', result);
-        
-        if (result.success) {
-            const { syncSummary } = result;
-            
-            if (syncSummary.successful === syncSummary.total) {
-                // All devices synced successfully
-                showNotification(`User updated successfully! Synced to all ${syncSummary.total} device(s).`);
-            } else if (syncSummary.successful > 0) {
-                // Some devices synced
-                showNotification(
-                    `User updated! Synced to ${syncSummary.successful}/${syncSummary.total} device(s). ${syncSummary.failed} device(s) failed.`,
-                    'warning'
-                );
-            } else {
-                // No devices synced but DB updated
-                showNotification(
-                    'User updated in database, but failed to sync to devices. Check if devices are online.',
-                    'warning'
-                );
-            }
-            
-            await populateUsers();
-            await updateStats();
-            closeModal();
-        } else {
-            showNotification(`Failed to update user: ${result.message}`, 'error');
+        const userId = document.getElementById('edit-user-id').value; // This is entry_id
+        const name = document.getElementById('edit-user-name').value;
+        const startDate = document.getElementById('edit-user-start-date').value;
+        const expiredIn = document.getElementById('edit-user-expired-in').value;
+        const expiredOut = document.getElementById('edit-user-expired-out').value;
+
+        if (!userId || !name || !startDate || !expiredIn || !expiredOut) {
+            showNotification('Please fill in all fields', 'error');
+            return;
         }
-    } catch (error) {
-        showNotification('Failed to update user.', 'error');
-        console.error('Failed to update user:', error);
-    } finally {
-        hideLoading();
-        updateBtn.disabled = false;
-        updateBtn.innerHTML = '<i class="fas fa-save"></i> Update User';
+
+        showLoading(true);
+
+        // Prepare updated user data with entry_id
+        const updatedUser = {
+            id: userId, // This is the entry_id
+            name: name,
+            start_date: convertToDeviceFormat(startDate),
+            expired_date_in: convertToDeviceFormat(expiredIn),
+            expired_date_out: convertToDeviceFormat(expiredOut)
+        };
+
+        // Update in database - this will update the latest entry for this user
+        const dbResult = await window.electronAPI.updateUser(updatedUser);
+
+        showLoading(false);
+        closeModal();
+        populateUsers();
+        showNotification('User updated successfully and synced to all devices', 'success');
+
+        console.log('Update results:', { dbResult });
+    } catch (err) {
+        console.error('Error updating user:', err);
+        showLoading(false);
+        showNotification('Failed to update user: ' + err.message, 'error');
     }
 }
 
@@ -1100,37 +1347,49 @@ async function toggleUserStatus() {
     );
 }
 
-async function deleteUser(userId) {
+async function deleteUser(recordId) {
     const users = await window.electronAPI.getUsers();
-    const user = users.find(u => u.id == userId);
+    const user = users.find(u => u.record_id == recordId);
     if (!user) return;
 
     showConfirmationModal(
-        'Delete User',
-        `Are you sure you want to permanently delete ${user.name}? This action will also delete the user from all devices.`,
+        'Delete User Entry',
+        `Are you sure you want to delete this entry for ${user.name}? If this is the only entry, the user will be removed from all devices.`,
         async () => {
-            const apiResults = await window.electronAPI.deleteUserFromAllDevices(user.id);
-            const allSuccess = apiResults.every(res => res.result === 0);
-
-            console.log(userId)
-
-            if (allSuccess) {
-                await window.electronAPI.deleteUser(userId);
-                showNotification('User deleted successfully from all devices and database!');
-                console.log("User successfully added to all devices and local database.");
+            // Check if this is the last entry for this user
+            const allUserEntries = users.filter(u => u.id === user.id);
+            
+            if (allUserEntries.length === 1) {
+                // Last entry - delete from devices too
+                const apiResults = await window.electronAPI.deleteUserFromAllDevices(user.id);
+                await window.electronAPI.deleteUser(recordId);
+                showNotification('User deleted from all devices and database!');
             } else {
-                const failedDevices = apiResults.filter(res => res.result !== 0);
-                const message = `User deleted from local DB but failed on some devices: ${failedDevices.map(d => d.device).join(', ')}. Check console for details.`;
-                showNotification(message, 'warning');
-                console.log("User added to local database, but failed on some devices. Saving to DB anyway for master list.");
-                await window.electronAPI.deleteUser(userId);
+                // Multiple entries exist - just delete this one
+                await window.electronAPI.deleteUser(recordId);
+                
+                // If this was the latest entry, mark the next most recent as latest
+                if (user.is_latest === 1) {
+                    const sortedEntries = allUserEntries
+                        .filter(u => u.record_id !== recordId)
+                        .sort((a, b) => new Date(b.entry_at) - new Date(a.entry_at));
+                    
+                    if (sortedEntries.length > 0) {
+                        // Update the next entry to be latest and sync to devices
+                        const nextLatest = sortedEntries[0];
+                        await window.electronAPI.updateUserStatus(nextLatest.record_id, 'Paid');
+                        await window.electronAPI.addUserToDevices(nextLatest.record_id);
+                    }
+                }
+                
+                showNotification('Entry deleted successfully!');
             }
+            
             await populateUsers();
             await updateStats();
         }
     );
 }
-
 async function syncApi() {
     showLoading();
     showNotification('Starting API sync...', 'info');
@@ -1165,6 +1424,7 @@ async function saveUser() {
     const role = document.getElementById('user-role').value;
     const area = document.getElementById('user-area').value;
     const newUserId = Date.now().toString();
+    const now = new Date();
 
     if (!name || !email || !role || !area) {
         showNotification('Please fill all required fields!', 'error');
@@ -1197,6 +1457,20 @@ async function saveUser() {
     }
 
     const cleanBase64 = capturedPhotoDataUrl.replace(/^data:image\/\w+;base64,/, "");
+    
+    // Format current date for device
+    const formatDateForDevice = (date) => {
+        const d = new Date(date);
+        const yyyy = d.getFullYear();
+        const mm = String(d.getMonth() + 1).padStart(2, "0");
+        const dd = String(d.getDate()).padStart(2, "0");
+        const hh = String(d.getHours()).padStart(2, "0");
+        const min = String(d.getMinutes()).padStart(2, "0");
+        const ss = String(d.getSeconds()).padStart(2, "0");
+        return `${yyyy}-${mm}-${dd} ${hh}:${min}:${ss}`;
+    };
+
+    const currentDateTime = formatDateForDevice(now);
     const newUser = {
         id: newUserId,
         name,
@@ -1205,7 +1479,11 @@ async function saveUser() {
         area,
         status: 'active',
         photo: photoPath,
-        base64: cleanBase64
+        base64: cleanBase64,
+        start_date: currentDateTime,
+        entry_at: currentDateTime,
+        expired_date_in: currentDateTime,
+        expired_date_out: currentDateTime
     };
 
     console.log("Attempting to add user to devices and local DB...");

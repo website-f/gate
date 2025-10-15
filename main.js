@@ -54,8 +54,10 @@ app.on('window-all-closed', () => {
 
 function setupDatabaseAndLoadSettings() {
     db.serialize(() => {
+        // Updated users table - removed PRIMARY KEY constraint from id
         db.run(`CREATE TABLE IF NOT EXISTS users (
-            id TEXT PRIMARY KEY,
+            record_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id TEXT NOT NULL,
             name TEXT,
             email TEXT,
             role TEXT,
@@ -64,16 +66,26 @@ function setupDatabaseAndLoadSettings() {
             photo TEXT,
             order_detail_id INTEGER,
             order_id TEXT,
+            order_turnstile_id INTEGER,
             start_date TEXT,
+            entry_at TEXT,
             expired_date_in TEXT,
-            expired_date_out TEXT
+            expired_date_out TEXT,
+            is_latest INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )`);
+        
+        // Create index for faster queries on entry_id
+        db.run(`CREATE INDEX IF NOT EXISTS idx_users_id ON users(id)`);
+        db.run(`CREATE INDEX IF NOT EXISTS idx_users_is_latest ON users(is_latest)`);
+        
         db.run(`CREATE TABLE IF NOT EXISTS areas (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT,
             description TEXT,
             accessLevel TEXT
         )`);
+        
         db.run(`CREATE TABLE IF NOT EXISTS devices (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT,
@@ -82,6 +94,7 @@ function setupDatabaseAndLoadSettings() {
             status TEXT,
             lastSeen TEXT
         )`);
+        
         db.run(`CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
             value TEXT
@@ -106,19 +119,19 @@ function loadSettings() {
             db.run("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", ['DEVICE_PASS', apiSettings.DEVICE_PASS]);
         }
         if (!apiSettings.BACKOFFICE_API_URL) {
-            apiSettings.BACKOFFICE_API_URL = "https://dev-backoffice-api.qbot.jp/api";
+            apiSettings.BACKOFFICE_API_URL = "https://backoffice-api.qkiosk.ai/api";
             db.run("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", ['BACKOFFICE_API_URL', apiSettings.BACKOFFICE_API_URL]);
         }
         if (!apiSettings.API_EMAIL) {
-            apiSettings.API_EMAIL = "cravedev@craveasia.com";
+            apiSettings.API_EMAIL = "";
             db.run("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", ['API_EMAIL', apiSettings.API_EMAIL]);
         }
         if (!apiSettings.API_PASSWORD) {
-            apiSettings.API_PASSWORD = "12345678";
+            apiSettings.API_PASSWORD = "";
             db.run("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", ['API_PASSWORD', apiSettings.API_PASSWORD]);
         }
         if (!apiSettings.STORE_ID) {
-            apiSettings.STORE_ID = "1"; // default
+            apiSettings.STORE_ID = "0"; // default
             db.run("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", ['STORE_ID', apiSettings.STORE_ID]);
         }
         if (!apiSettings.ENTRY_TIME_LIMIT) {
@@ -147,39 +160,30 @@ function mergeUserData(existingUser, newUser) {
 
 function addUserToDB(user) {
     return new Promise((resolve, reject) => {
-        const { id, name, email, role, area, status, photo, order_detail_id, order_id, start_date, expired_date_in, expired_date_out } = user;
+        const { 
+            id, name, email, role, area, status, photo, 
+            order_detail_id, order_id, order_turnstile_id,
+            start_date, entry_at, expired_date_in, expired_date_out, is_latest 
+        } = user;
         
-        db.get(`SELECT * FROM users WHERE id = ?`, [id], (err, existingRow) => {
-            if (err) {
-                return reject(err);
+        // Insert the new entry (allowing duplicate ids)
+        db.run(
+            `INSERT INTO users (
+                id, name, email, role, area, status, photo, 
+                order_detail_id, order_id, order_turnstile_id,
+                start_date, entry_at, expired_date_in, expired_date_out, is_latest
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+                id, name, email, role, area, status, photo, 
+                order_detail_id, order_id, order_turnstile_id,
+                start_date, entry_at, expired_date_in, expired_date_out, is_latest
+            ],
+            function (err) {
+                if (err) return reject(err);
+                console.log(`Inserted new entry with record_id: ${this.lastID}, id: ${id}`);
+                resolve({ record_id: this.lastID, id: id, changes: this.changes, operation: 'INSERT' });
             }
-
-            if (existingRow) {
-                console.log(`User with ID ${id} already exists. Merging and updating record.`);
-                const mergedUser = mergeUserData(existingRow, user);
-                
-                db.run(
-                    `UPDATE users SET name = ?, email = ?, role = ?, area = ?, status = ?, photo = ?, order_detail_id = ?, order_id = ?, start_date = ?, expired_date_in = ?, expired_date_out = ? WHERE id = ?`,
-                    [mergedUser.name, mergedUser.email, mergedUser.role, mergedUser.area, mergedUser.status, mergedUser.photo, mergedUser.order_detail_id, mergedUser.order_id, mergedUser.start_date, mergedUser.expired_date_in, mergedUser.expired_date_out, id],
-                    function (err) {
-                        if (err) return reject(err);
-                        console.log(`Updated user with ID ${id}. Changes: ${this.changes}`);
-                        resolve({ id: user.id, changes: this.changes, operation: 'UPDATE' });
-                    }
-                );
-            } else {
-                console.log(`User with ID ${id} is new. Inserting new record.`);
-                db.run(
-                    `INSERT INTO users (id, name, email, role, area, status, photo, order_detail_id, order_id, start_date, expired_date_in, expired_date_out) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                    [id, name, email, role, area, status, photo, order_detail_id, order_id, start_date, expired_date_in, expired_date_out],
-                    function (err) {
-                        if (err) return reject(err);
-                        console.log(`Inserted new user with ID ${id}. Changes: ${this.changes}`);
-                        resolve({ id: user.id, changes: this.changes, operation: 'INSERT' });
-                    }
-                );
-            }
-        });
+        );
     });
 }
 
@@ -222,14 +226,71 @@ async function addUserToAllDevices(user) {
                             payload.data.passAlgo = true;
                         }
 
-                        console.log(payload);
+                        console.log("Sending payload to device:", device.ip);
 
                         const response = await axios.post(url, payload);
-                        results.push({
-                            device: device.ip,
-                            result: response.data.result,
-                            message: response.data.message
-                        });
+                        
+                        // Check for duplicate face error
+                        if (response.data.result === 1 && response.data.message.includes('照片重复')) {
+                            console.log(`Duplicate face detected on device ${device.ip}. Attempting to extract existing ID...`);
+                            
+                            // Extract the existing IC number from the error message
+                            // Message format: "录入失败,1760513476,1760513476与User-1037,404165280418照片重复,请检查!"
+                            const regex = /与[^,]+,(\d+)照片重复/;
+                            const match = response.data.message.match(regex);
+                            
+                            if (match && match[1]) {
+                                const existingIcno = match[1];
+                                console.log(`Found existing IC number: ${existingIcno}. Retrying with this ID...`);
+                                
+                                // Retry with the existing IC number
+                                const retryPayload = {
+                                    totalnum: 1,
+                                    pass: apiSettings.DEVICE_PASS,
+                                    currentnum: 1,
+                                    data: {
+                                        usertype: "white",
+                                        name: user.name,
+                                        idno: existingIcno,
+                                        icno: existingIcno,
+                                        peoplestartdate: user.start_date,
+                                        peopleenddate: user.expired_date_out,
+                                    }
+                                };
+
+                                if (user.base64 && user.base64.trim() !== "") {
+                                    retryPayload.data.picData1 = user.base64;
+                                } else {
+                                    retryPayload.data.passAlgo = true;
+                                }
+
+                                console.log("Retrying with existing IC number:", existingIcno);
+                                const retryResponse = await axios.post(url, retryPayload);
+                                
+                                results.push({
+                                    device: device.ip,
+                                    result: retryResponse.data.result,
+                                    message: retryResponse.data.message,
+                                    originalId: user.id,
+                                    updatedId: existingIcno,
+                                    retry: true
+                                });
+                            } else {
+                                // Could not extract ID, return original error
+                                results.push({
+                                    device: device.ip,
+                                    result: response.data.result,
+                                    message: response.data.message
+                                });
+                            }
+                        } else {
+                            // No duplicate error
+                            results.push({
+                                device: device.ip,
+                                result: response.data.result,
+                                message: response.data.message
+                            });
+                        }
                     } else {
                         results.push({
                             device: device.ip,
@@ -250,7 +311,6 @@ async function addUserToAllDevices(user) {
         });
     });
 }
-
 
 async function getImageBase64(url) {
     try {
@@ -310,7 +370,7 @@ async function performLoginAndSync() {
 
         // 2. Fetch turnstile order details
         const syncResponse = await axios.get(
-            `${apiSettings.BACKOFFICE_API_URL}/turnstile-order-details?store_id=${encodeURIComponent(apiSettings.STORE_ID)}`,
+            `${apiSettings.BACKOFFICE_API_URL}/turnstiles?store_id=${encodeURIComponent(apiSettings.STORE_ID)}`,
             { headers: { Authorization: `Bearer ${token}`, Accept: "application/json" } }
         );
 
@@ -321,108 +381,68 @@ async function performLoginAndSync() {
         }
         console.log(`Found ${turnstileDataList.length} turnstile records to process.`);
 
-        // 3. Get existing users from database
-        const existingUsers = await new Promise((resolve, reject) => {
-            db.all("SELECT id FROM users", [], (err, rows) => {
-                if (err) reject(err);
-                else resolve(rows.map(row => row.id));
-            });
+        // 3. Group entries by entry_id to find the latest entry for each person
+        const entriesByPerson = {};
+        turnstileDataList.forEach(entry => {
+            const entryId = entry.entry_id;
+            if (!entryId) return;
+            
+            if (!entriesByPerson[entryId]) {
+                entriesByPerson[entryId] = [];
+            }
+            entriesByPerson[entryId].push(entry);
         });
 
-        const existingUserIds = new Set(existingUsers);
-        console.log(`Existing user IDs in database: ${existingUserIds.size}`);
+        // 4. For each person, sort by entry_at and get the latest
+        const latestEntriesMap = {};
+        Object.keys(entriesByPerson).forEach(entryId => {
+            const entries = entriesByPerson[entryId];
+            // Sort by entry_at descending (latest first)
+            entries.sort((a, b) => new Date(b.entry_at) - new Date(a.entry_at));
+            latestEntriesMap[entryId] = entries[0]; // Get the latest entry
+        });
 
-        // 4. Track updates needed for API
+        // 5. Track updates needed for API
         const turnstileUpdates = [];
 
-        // 5. Process each turnstile record
+        // 6. Process each entry
         const results = await Promise.all(
             turnstileDataList.map(async (turnstileData) => {
                 let entryId = turnstileData.entry_id;
                 let needsUpdate = false;
 
-                // Check if entry_id is null or doesn't exist in DB
+                // Generate entry_id if missing
                 if (!entryId) {
-                    // Generate new entry_id
                     entryId = generateUniqueId();
                     needsUpdate = true;
-                    console.log(`Generated new entry_id: ${entryId} for turnstile_order_detail_id: ${turnstileData.turnstile_order_detail_id}`);
-                } else if (existingUserIds.has(entryId)) {
-                    // User already exists, check if image needs update
-                    console.log(`User with entry_id ${entryId} already exists. Checking for image updates...`);
+                    console.log(`Generated new entry_id: ${entryId} for order_turnstile_id: ${turnstileData.order_turnstile_id}`);
                     
-                    const existingUser = await new Promise((resolve, reject) => {
-                        db.get("SELECT * FROM users WHERE id = ?", [entryId], (err, row) => {
+                    turnstileUpdates.push({
+                        order_turnstile_id: turnstileData.order_turnstile_id,
+                        order_id: turnstileData.order_id,
+                        entry_id: entryId
+                    });
+                }
+
+                // Check if this entry already exists in database
+                const existingEntry = await new Promise((resolve, reject) => {
+                    db.get(
+                        "SELECT * FROM users WHERE order_turnstile_id = ?",
+                        [turnstileData.order_turnstile_id],
+                        (err, row) => {
                             if (err) reject(err);
                             else resolve(row);
-                        });
-                    });
-
-                    // Check if image needs update
-                    if (turnstileData.image) {
-                        let base64Image = null;
-                        let photoPath = null;
-
-                        const imgBase64 = await getImageBase64(turnstileData.image);
-                        if (imgBase64) {
-                            const cleanBase64 = imgBase64.replace(/^data:image\/\w+;base64,/, "");
-                            base64Image = cleanBase64;
-                            
-                            try {
-                                const buffer = Buffer.from(cleanBase64, "base64");
-                                const fileName = `${turnstileData.turnstile_order_detail_id}_${Date.now()}.jpg`;
-                                const uploadsDir = path.join(app.getPath("userData"), "uploads");
-                                fs.mkdirSync(uploadsDir, { recursive: true });
-                                const fullPath = path.join(uploadsDir, fileName);
-                                fs.writeFileSync(fullPath, buffer);
-                                photoPath = path.join("uploads", fileName);
-
-                                // Delete old photo if exists
-                                if (existingUser.photo) {
-                                    deletePhotoFile(existingUser.photo);
-                                }
-
-                                // Update photo in database
-                                await new Promise((resolve, reject) => {
-                                    db.run(
-                                        "UPDATE users SET photo = ? WHERE id = ?",
-                                        [photoPath, entryId],
-                                        function(err) {
-                                            if (err) reject(err);
-                                            else resolve({ changes: this.changes });
-                                        }
-                                    );
-                                });
-
-                                // Update user on devices with new photo
-                                const userForDevice = {
-                                    ...existingUser,
-                                    photo: photoPath,
-                                    base64: base64Image
-                                };
-                                await addUserToAllDevices(userForDevice);
-                                
-                                console.log(`Updated photo for user ${entryId}`);
-                            } catch (err) {
-                                console.error("Error updating photo:", err.message);
-                            }
                         }
-                    }
+                    );
+                });
 
+                if (existingEntry) {
+                    console.log(`Entry ${turnstileData.order_turnstile_id} already exists, skipping`);
                     return { 
                         entryId, 
                         skipped: true, 
-                        message: "User already exists, image checked/updated" 
+                        message: "Entry already exists in database" 
                     };
-                }
-
-                // Prepare turnstile update data if needed
-                if (needsUpdate) {
-                    turnstileUpdates.push({
-                        turnstile_order_detail_id: turnstileData.turnstile_order_detail_id,
-                        order_detail_id: turnstileData.order_detail_id,
-                        entry_id: entryId
-                    });
                 }
 
                 // Download and save image
@@ -436,7 +456,7 @@ async function performLoginAndSync() {
                         base64Image = cleanBase64;
                         try {
                             const buffer = Buffer.from(cleanBase64, "base64");
-                            const fileName = `${turnstileData.turnstile_order_detail_id}_${Date.now()}.jpg`;
+                            const fileName = `${turnstileData.order_turnstile_id}_${Date.now()}.jpg`;
                             const uploadsDir = path.join(app.getPath("userData"), "uploads");
                             fs.mkdirSync(uploadsDir, { recursive: true });
                             const fullPath = path.join(uploadsDir, fileName);
@@ -454,47 +474,72 @@ async function performLoginAndSync() {
                 const entryTimeLimitHours = parseInt(apiSettings.ENTRY_TIME_LIMIT) || 2;
                 const exitDate = new Date(entryDate.getTime() + (entryTimeLimitHours * 60 * 60 * 1000));
 
+                // Determine if this is the latest entry for this person
+                const isLatest = latestEntriesMap[entryId]?.order_turnstile_id === turnstileData.order_turnstile_id ? 1 : 0;
+
                 // Create user object
                 const user = {
                     id: entryId,
-                    name: `User-${turnstileData.order_detail_id}`,
+                    name: `User-${turnstileData.order_id}`,
                     email: null,
                     role: "guest",
                     area: "default",
                     status: "Paid",
                     photo: photoPath,
                     base64: base64Image,
-                    order_detail_id: turnstileData.order_detail_id,
-                    order_id: turnstileData.order_detail_id.toString(),
+                    order_detail_id: turnstileData.order_id,
+                    order_id: turnstileData.order_id.toString(),
+                    order_turnstile_id: turnstileData.order_turnstile_id,
                     start_date: formatDateForDevice(turnstileData.entry_at),
+                    entry_at: formatDateForDevice(turnstileData.entry_at),
                     expired_date_in: formatDateForDevice(turnstileData.entry_at),
                     expired_date_out: formatDateForDevice(exitDate),
+                    is_latest: isLatest
                 };
 
                 // Add to database
                 const dbResult = await addUserToDB(user);
                 
-                // Add to devices
-                const deviceResults = await addUserToAllDevices(user);
+                // Only sync to devices if this is the latest entry for this person
+                let deviceResults = [];
+                if (isLatest) {
+                    // Mark all other entries for this person as not latest
+                    await new Promise((resolve, reject) => {
+                        db.run(
+                            "UPDATE users SET is_latest = 0 WHERE id = ? AND order_turnstile_id != ?",
+                            [entryId, turnstileData.order_turnstile_id],
+                            (err) => {
+                                if (err) reject(err);
+                                else resolve();
+                            }
+                        );
+                    });
 
-                console.log(`Processed user ${user.name}:`, { dbResult, deviceResults });
+                    deviceResults = await addUserToAllDevices(user);
+                    console.log(`Synced latest entry to devices for user ${user.name}`);
+                } else {
+                    console.log(`Skipped device sync for non-latest entry ${turnstileData.order_turnstile_id}`);
+                }
+
+                console.log(`Processed user ${user.name}:`, { dbResult, deviceResults, isLatest });
 
                 return { 
                     entryId, 
                     dbResult, 
                     deviceResults, 
                     success: true,
-                    needsUpdate 
+                    needsUpdate,
+                    isLatest 
                 };
             })
         );
 
-        // 6. Update entry_ids back to API if there are any
+        // 7. Update entry_ids back to API if there are any
         if (turnstileUpdates.length > 0) {
             console.log(`Updating ${turnstileUpdates.length} entry_ids back to API...`);
             try {
                 const updateResponse = await axios.post(
-                    `${apiSettings.BACKOFFICE_API_URL}/turnstile-order-details`,
+                    `${apiSettings.BACKOFFICE_API_URL}/turnstiles`,
                     { turnstileData: turnstileUpdates },
                     { 
                         headers: { 
@@ -511,10 +556,11 @@ async function performLoginAndSync() {
 
         const newUsers = results.filter(r => !r.skipped).length;
         const skippedUsers = results.filter(r => r.skipped).length;
+        const syncedToDevices = results.filter(r => r.isLatest).length;
 
         return { 
             success: true, 
-            message: `Sync completed. New users: ${newUsers}, Skipped: ${skippedUsers}`,
+            message: `Sync completed. New entries: ${newUsers}, Skipped: ${skippedUsers}, Synced to devices: ${syncedToDevices}`,
             results 
         };
 
@@ -746,75 +792,78 @@ function startApiServer() {
     });
 
     appServer.post('/api/offline', async (req, res) => {
-        const createUserLists = req.body.createUserLists || [];
-    
-        if (!Array.isArray(createUserLists) || createUserLists.length === 0) {
-            return res.status(400).json({ success: false, message: "No users to process" });
-        }
-    
-        const results = [];
-    
-        for (const userData of createUserLists) {
-            const { icno, user_image } = userData;
-    
-            try {
-                if (!icno || icno.trim() === "") {
-                    results.push({ icno, success: false, message: "IC number (icno) is required" });
-                    continue;
-                }
-    
-                let photoPath = null;
-                if (user_image && user_image.trim() !== "") {
-                    const cleanBase64 = user_image.replace(/^data:image\/\w+;base64,/, "");
-                    const buffer = Buffer.from(cleanBase64, "base64");
-    
-                    const fileName = `${icno}_${Date.now()}.jpg`;
-                    const uploadsDir = path.join(app.getPath("userData"), "uploads");
-                    fs.mkdirSync(uploadsDir, { recursive: true });
-    
-                    const fullPath = path.join(uploadsDir, fileName);
-                    fs.writeFileSync(fullPath, buffer);
-    
-                    photoPath = path.join("uploads", fileName);
-                }
-    
-                const user = {
-                    id: icno,
-                    name: userData.name || icno,
-                    email: userData.email || null,
-                    role: "guest",
-                    area: "default",
-                    status: null,
-                    base64: user_image || null,
-                    photo: photoPath || null,
-                    order_detail_id: userData.order_detail_id || null,
-                    order_id: userData.order_id || null,
-                    start_date: userData.start_date || null,
-                    expired_date_in: userData.expired_date_in || null,
-                    expired_date_out: userData.expired_date_out || null
-                };
-    
-                // Add user to devices only (no DB save)
-                const dbResult = await addUserToDB(user);
-                
-    
-                results.push({
-                    icno,
-                    success: true,
-                    db: dbResult,
-                });
-    
-            } catch (err) {
-                results.push({ icno, success: false, message: err.message });
+    const createUserLists = req.body.createUserLists || [];
+
+    if (!Array.isArray(createUserLists) || createUserLists.length === 0) {
+        return res.status(400).json({ success: false, message: "No users to process" });
+    }
+
+    const results = [];
+
+    for (const userData of createUserLists) {
+        const { icno, user_image } = userData;
+
+        try {
+            if (!icno || icno.trim() === "") {
+                results.push({ icno, success: false, message: "IC number (icno) is required" });
+                continue;
             }
+
+            let photoPath = null;
+            if (user_image && user_image.trim() !== "") {
+                const cleanBase64 = user_image.replace(/^data:image\/\w+;base64,/, "");
+                const buffer = Buffer.from(cleanBase64, "base64");
+
+                const fileName = `${icno}_${Date.now()}.jpg`;
+                const uploadsDir = path.join(app.getPath("userData"), "uploads");
+                fs.mkdirSync(uploadsDir, { recursive: true });
+
+                const fullPath = path.join(uploadsDir, fileName);
+                fs.writeFileSync(fullPath, buffer);
+
+                photoPath = path.join("uploads", fileName);
+            }
+
+            const user = {
+                id: icno,
+                name: userData.name || icno,
+                email: userData.email || null,
+                role: "guest",
+                area: "default",
+                status: "Unpaid", // Changed from null to "Unpaid"
+                base64: user_image || null,
+                photo: photoPath || null,
+                order_detail_id: userData.order_detail_id || null,
+                order_id: userData.order_id || null,
+                order_turnstile_id: null,
+                start_date: userData.start_date || null,
+                entry_at: userData.start_date || null,
+                expired_date_in: userData.start_date || null,
+                expired_date_out: userData.expired_date_out || null,
+                is_latest: 1 // Mark as latest entry
+            };
+
+            // Add user to database
+            const dbResult = await addUserToDB(user);
+
+            results.push({
+                icno,
+                success: true,
+                db: dbResult,
+                message: "User added to database with Unpaid status"
+            });
+
+        } catch (err) {
+            results.push({ icno, success: false, message: err.message });
         }
-    
-        res.json({
-            success: true,
-            message: "Offline batch processing completed",
-            results
-        });
+    }
+
+    res.json({
+        success: true,
+        message: "Offline batch processing completed",
+        results
     });
+});
 
 
     appServer.listen(PORT, '0.0.0.0', () => {
@@ -864,10 +913,10 @@ async function getDeviceStatus(ip) {
 }
 
 
-ipcMain.handle('addUserToDevices', async (event, userId) => {
+ipcMain.handle('addUserToDevices', async (event, recordId) => {
     try {
         // Fetch user from DB
-        const userFromDB = await getUserFromDB(userId);
+        const userFromDB = await getUserFromDB(recordId);
         if (!userFromDB) throw new Error('User not found in database');
 
         // Prepare clean base64 image
@@ -919,7 +968,7 @@ ipcMain.handle('addUserToDevices', async (event, userId) => {
 
                     // Retry sync
                     results = await addUserToAllDevices(user);
-                    break; // assume only need to retry once
+                    break;
                 }
             }
         }
@@ -936,11 +985,27 @@ ipcMain.handle('db:updateUser', async (event, user) => {
     try {
         const { id, name, start_date, expired_date_in, expired_date_out } = user;
         
+        // Get the latest entry for this user
+        const latestUser = await new Promise((resolve, reject) => {
+            db.get(
+                "SELECT * FROM users WHERE id = ? AND is_latest = 1 ORDER BY entry_at DESC LIMIT 1", 
+                [id], 
+                (err, row) => {
+                    if (err) reject(err);
+                    else resolve(row);
+                }
+            );
+        });
+
+        if (!latestUser) {
+            throw new Error('User not found');
+        }
+
         // Step 1: Update in database
         await new Promise((resolve, reject) => {
             db.run(
-                `UPDATE users SET name = ?, start_date = ?, expired_date_in = ?, expired_date_out = ? WHERE id = ?`,
-                [name, start_date, expired_date_in, expired_date_out, id],
+                `UPDATE users SET name = ?, start_date = ?, expired_date_in = ?, expired_date_out = ? WHERE record_id = ?`,
+                [name, start_date, expired_date_in, expired_date_out, latestUser.record_id],
                 function(err) {
                     if (err) {
                         console.error('Error updating user in database:', err);
@@ -953,9 +1018,9 @@ ipcMain.handle('db:updateUser', async (event, user) => {
             );
         });
 
-        // Step 2: Get full user data from database (including photo)
+        // Step 2: Get updated user data from database (including photo)
         const fullUser = await new Promise((resolve, reject) => {
-            db.get("SELECT * FROM users WHERE id = ?", [id], (err, row) => {
+            db.get("SELECT * FROM users WHERE record_id = ?", [latestUser.record_id], (err, row) => {
                 if (err) {
                     console.error('Error fetching user from database:', err);
                     reject(err);
@@ -1009,11 +1074,9 @@ ipcMain.handle('db:updateUser', async (event, user) => {
             const url = `http://${device.ip}:9090/addDeviceWhiteList`;
 
             try {
-                // Check device status
                 const status = await getDeviceStatus(device.ip);
                 
                 if (status === "online") {
-                    // Prepare request payload
                     const payload = {
                         totalnum: 1,
                         pass: apiSettings.DEVICE_PASS,
@@ -1028,19 +1091,13 @@ ipcMain.handle('db:updateUser', async (event, user) => {
                         }
                     };
 
-                    // Add image if present
                     if (base64Image && base64Image.trim() !== "") {
                         payload.data.picData1 = base64Image;
                     } else {
-                        // Add passAlgo if image is missing
                         payload.data.passAlgo = true;
                     }
 
-                    console.log(`📤 Sending update to device ${device.ip}:`, {
-                        name: payload.data.name,
-                        idno: payload.data.idno,
-                        hasPhoto: !!payload.data.picData1
-                    });
+                    console.log(`📤 Sending update to device ${device.ip}`);
 
                     const response = await axios.post(url, payload);
                     
@@ -1076,7 +1133,6 @@ ipcMain.handle('db:updateUser', async (event, user) => {
             }
         }
 
-        // Count successful syncs
         const successfulSyncs = deviceResults.filter(r => r.success).length;
         const totalDevices = devices.length;
 
@@ -1105,19 +1161,19 @@ ipcMain.handle('db:updateUser', async (event, user) => {
 });
 
 // Example: get user from DB
-function getUserFromDB(userId) {
+function getUserFromDB(recordId) {
     return new Promise((resolve, reject) => {
-        db.get("SELECT * FROM users WHERE id = ?", [userId], (err, row) => {
+        db.get("SELECT * FROM users WHERE record_id = ?", [recordId], (err, row) => {
             if (err) return reject(err);
             resolve(row);
         });
     });
 }
 
-ipcMain.handle('updateUserStatus', async (event, userId, status) => {
+ipcMain.handle('updateUserStatus', async (event, recordId, status) => {
     return new Promise((resolve, reject) => {
-        const sql = "UPDATE users SET status = ? WHERE id = ?";
-        db.run(sql, [status, userId], function(err) {
+        const sql = "UPDATE users SET status = ? WHERE record_id = ?";
+        db.run(sql, [status, recordId], function(err) {
             if (err) return reject(err);
             resolve({ success: true });
         });
@@ -1272,7 +1328,7 @@ ipcMain.handle('app:getUserDataPath', () => {
 
 ipcMain.handle('db:getUsers', async () => {
     return new Promise((resolve, reject) => {
-        db.all("SELECT * FROM users", [], (err, rows) => {
+        db.all("SELECT * FROM users ORDER BY entry_at DESC, created_at DESC", [], (err, rows) => {
             if (err) reject(err);
             resolve(rows);
         });
@@ -1281,22 +1337,37 @@ ipcMain.handle('db:getUsers', async () => {
 
 ipcMain.handle('db:addUser', (event, user) => {
     return new Promise((resolve, reject) => {
-        const { id, name, email, role, area, status, photo, order_detail_id, start_date, expired_date_in, expired_date_out } = user;
-        db.run(`INSERT INTO users (id, name, email, role, area, status, photo, order_detail_id, start_date, expired_date_in, expired_date_out) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [id, name, email, role, area, status, photo, order_detail_id, start_date, expired_date_in, expired_date_out], function(err) {
+        const { 
+            id, name, email, role, area, status, photo, 
+            order_detail_id, order_id, order_turnstile_id,
+            start_date, entry_at, expired_date_in, expired_date_out 
+        } = user;
+        
+        db.run(
+            `INSERT INTO users (
+                id, name, email, role, area, status, photo, 
+                order_detail_id, order_id, order_turnstile_id,
+                start_date, entry_at, expired_date_in, expired_date_out, is_latest
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+            [
+                id, name, email, role, area, status, photo, 
+                order_detail_id, order_id, order_turnstile_id,
+                start_date, entry_at || start_date, expired_date_in, expired_date_out
+            ], 
+            function(err) {
                 if (err) reject(err);
-                resolve({ id: this.lastID });
+                resolve({ record_id: this.lastID, id: id });
             }
         );
     });
 });
 
-ipcMain.handle('db:deleteUser', (event, id) => {
+ipcMain.handle('db:deleteUser', (event, recordId) => {
     return new Promise((resolve, reject) => {
-        db.get("SELECT photo FROM users WHERE id = ?", [String(id)], (err, user) => {
+        db.get("SELECT photo FROM users WHERE record_id = ?", [recordId], (err, user) => {
             if (err) return reject(err);
 
-            db.run(`DELETE FROM users WHERE id = ?`, [String(id)], function(err) {
+            db.run(`DELETE FROM users WHERE record_id = ?`, [recordId], function(err) {
                 if (err) return reject(err);
 
                 if (user && user.photo) {
@@ -1309,17 +1380,17 @@ ipcMain.handle('db:deleteUser', (event, id) => {
     });
 });
 
-ipcMain.handle('db:bulkDeleteUsers', (event, ids) => {
+ipcMain.handle('db:bulkDeleteUsers', (event, recordIds) => {
     return new Promise((resolve, reject) => {
-        if (!Array.isArray(ids) || ids.length === 0) {
+        if (!Array.isArray(recordIds) || recordIds.length === 0) {
             return resolve({ changes: 0 });
         }
 
-        const placeholders = ids.map(() => '?').join(',');
-        db.all(`SELECT photo FROM users WHERE id IN (${placeholders})`, ids, (err, rows) => {
+        const placeholders = recordIds.map(() => '?').join(',');
+        db.all(`SELECT photo FROM users WHERE record_id IN (${placeholders})`, recordIds, (err, rows) => {
             if (err) return reject(err);
 
-            db.run(`DELETE FROM users WHERE id IN (${placeholders})`, ids, function (err) {
+            db.run(`DELETE FROM users WHERE record_id IN (${placeholders})`, recordIds, function (err) {
                 if (err) return reject(err);
 
                 rows.forEach(user => {
