@@ -9,8 +9,41 @@ const bodyParser = require('body-parser');
 const cors = require('cors');
 const fs = require('fs');
 
+// Set default encoding for axios responses
+axios.defaults.responseType = 'json';
+axios.defaults.responseEncoding = 'utf8';
+
 let db;
 let apiSettings = {};
+
+
+
+// Helper to translate common Chinese device messages to English for readable console output
+function translateDeviceMessage(msg) {
+    if (!msg) return '';
+    let translated = msg;
+
+    // Common device errors
+    if (msg.includes('只能支持数字字母下划线')) {
+        translated = msg.replace('只能支持数字字母下划线', ' -> contains invalid characters (only numbers, letters, underscore allowed)');
+        translated = translated.replace('信息', 'Info');
+        translated = translated.replace('name', 'Name');
+    }
+    else if (msg.includes('照片重复')) {
+        translated = msg.replace('照片重复', ' -> Duplicate photo detected');
+    }
+    else if (msg.includes('录入失败')) {
+        translated = msg.replace('录入失败', 'Registration Failed');
+    }
+    else if (msg.includes('录入成功')) {
+        translated = msg.replace('录入成功', 'Registration Success');
+    }
+    else if (msg.includes('成功')) {
+        translated = msg.replace('成功', 'Success');
+    }
+
+    return translated;
+}
 
 function createWindow() {
     const mainWindow = new BrowserWindow({
@@ -54,7 +87,7 @@ app.on('window-all-closed', () => {
 
 function setupDatabaseAndLoadSettings() {
     db.serialize(() => {
-        // Updated users table - removed PRIMARY KEY constraint from id
+        // Updated users table with entry_dates JSON column
         db.run(`CREATE TABLE IF NOT EXISTS users (
             record_id INTEGER PRIMARY KEY AUTOINCREMENT,
             id TEXT NOT NULL,
@@ -64,9 +97,12 @@ function setupDatabaseAndLoadSettings() {
             area TEXT,
             status TEXT,
             photo TEXT,
+            customer_id INTEGER,
             order_detail_id INTEGER,
             order_id TEXT,
             order_turnstile_id INTEGER,
+            entry_dates TEXT,
+            entry_period INTEGER DEFAULT 0,
             start_date TEXT,
             entry_at TEXT,
             expired_date_in TEXT,
@@ -74,18 +110,35 @@ function setupDatabaseAndLoadSettings() {
             is_latest INTEGER DEFAULT 0,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )`);
-        
-        // Create index for faster queries on entry_id
+
+        // Migration: Add new columns if they don't exist
+        db.run(`ALTER TABLE users ADD COLUMN entry_dates TEXT`, (err) => {
+            if (err && !err.message.includes('duplicate column')) {
+                console.error('Migration error:', err.message);
+            }
+        });
+        db.run(`ALTER TABLE users ADD COLUMN entry_period INTEGER DEFAULT 0`, (err) => {
+            if (err && !err.message.includes('duplicate column')) {
+                console.error('Migration error:', err.message);
+            }
+        });
+        db.run(`ALTER TABLE users ADD COLUMN customer_id INTEGER`, (err) => {
+            if (err && !err.message.includes('duplicate column')) {
+                console.error('Migration error:', err.message);
+            }
+        });
+
+        // Create index for faster queries
         db.run(`CREATE INDEX IF NOT EXISTS idx_users_id ON users(id)`);
-        db.run(`CREATE INDEX IF NOT EXISTS idx_users_is_latest ON users(is_latest)`);
-        
+        db.run(`CREATE INDEX IF NOT EXISTS idx_users_order_detail_id ON users(order_detail_id)`);
+
         db.run(`CREATE TABLE IF NOT EXISTS areas (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT,
             description TEXT,
             accessLevel TEXT
         )`);
-        
+
         db.run(`CREATE TABLE IF NOT EXISTS devices (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT,
@@ -94,7 +147,7 @@ function setupDatabaseAndLoadSettings() {
             status TEXT,
             lastSeen TEXT
         )`);
-        
+
         db.run(`CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
             value TEXT
@@ -160,22 +213,25 @@ function mergeUserData(existingUser, newUser) {
 
 function addUserToDB(user) {
     return new Promise((resolve, reject) => {
-        const { 
-            id, name, email, role, area, status, photo, 
-            order_detail_id, order_id, order_turnstile_id,
-            start_date, entry_at, expired_date_in, expired_date_out, is_latest 
+        const {
+            id, name, email, role, area, status, photo,
+            customer_id, order_detail_id, order_id, order_turnstile_id,
+            entry_dates, entry_period,
+            start_date, entry_at, expired_date_in, expired_date_out, is_latest
         } = user;
-        
-        // Insert the new entry (allowing duplicate ids)
+
+        // Insert the new entry
         db.run(
             `INSERT INTO users (
                 id, name, email, role, area, status, photo, 
-                order_detail_id, order_id, order_turnstile_id,
+                customer_id, order_detail_id, order_id, order_turnstile_id,
+                entry_dates, entry_period,
                 start_date, entry_at, expired_date_in, expired_date_out, is_latest
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
-                id, name, email, role, area, status, photo, 
-                order_detail_id, order_id, order_turnstile_id,
+                id, name, email, role, area, status, photo,
+                customer_id, order_detail_id, order_id, order_turnstile_id,
+                entry_dates, entry_period,
                 start_date, entry_at, expired_date_in, expired_date_out, is_latest
             ],
             function (err) {
@@ -210,7 +266,7 @@ async function addUserToAllDevices(user) {
                             currentnum: 1,
                             data: {
                                 usertype: "white",
-                                name: user.name,
+                                name: user.name ? user.name.trim().split(/\s+/)[0] : '',
                                 idno: user.id,
                                 icno: user.id,
                                 peoplestartdate: user.start_date,
@@ -228,21 +284,36 @@ async function addUserToAllDevices(user) {
 
                         console.log("Sending payload to device:", device.ip);
 
-                        const response = await axios.post(url, payload);
-                        
-                        // Check for duplicate face error
-                        if (response.data.result === 1 && response.data.message.includes('照片重复')) {
+                        // Make request with proper encoding
+                        const response = await axios.post(url, payload, {
+                            responseType: 'arraybuffer',
+                            headers: {
+                                'Content-Type': 'application/json; charset=utf-8'
+                            }
+                        });
+
+                        // Decode response from arraybuffer to proper UTF-8 string
+                        const responseText = Buffer.from(response.data).toString('utf8');
+                        const responseData = JSON.parse(responseText);
+
+                        console.log(`Device ${device.ip} response:`, {
+                            result: responseData.result,
+                            message: translateDeviceMessage(responseData.message)
+                        });
+
+                        // Check for duplicate face error (照片重复 means "duplicate photo")
+                        if (responseData.result === 1 && responseData.message && responseData.message.includes('照片重复')) {
                             console.log(`Duplicate face detected on device ${device.ip}. Attempting to extract existing ID...`);
-                            
+
                             // Extract the existing IC number from the error message
                             // Message format: "录入失败,1760513476,1760513476与User-1037,404165280418照片重复,请检查!"
                             const regex = /与[^,]+,(\d+)照片重复/;
-                            const match = response.data.message.match(regex);
-                            
+                            const match = responseData.message.match(regex);
+
                             if (match && match[1]) {
                                 const existingIcno = match[1];
                                 console.log(`Found existing IC number: ${existingIcno}. Retrying with this ID...`);
-                                
+
                                 // Retry with the existing IC number
                                 const retryPayload = {
                                     totalnum: 1,
@@ -250,7 +321,7 @@ async function addUserToAllDevices(user) {
                                     currentnum: 1,
                                     data: {
                                         usertype: "white",
-                                        name: user.name,
+                                        name: user.name ? user.name.trim().split(/\s+/)[0] : '',
                                         idno: existingIcno,
                                         icno: existingIcno,
                                         peoplestartdate: user.start_date,
@@ -265,12 +336,19 @@ async function addUserToAllDevices(user) {
                                 }
 
                                 console.log("Retrying with existing IC number:", existingIcno);
-                                const retryResponse = await axios.post(url, retryPayload);
-                                
+                                const retryRes = await axios.post(url, retryPayload, {
+                                    responseType: 'arraybuffer',
+                                    headers: {
+                                        'Content-Type': 'application/json; charset=utf-8'
+                                    }
+                                });
+                                const retryText = Buffer.from(retryRes.data).toString('utf8');
+                                const retryData = JSON.parse(retryText);
+
                                 results.push({
                                     device: device.ip,
-                                    result: retryResponse.data.result,
-                                    message: retryResponse.data.message,
+                                    result: retryData.result,
+                                    message: retryData.message,
                                     originalId: user.id,
                                     updatedId: existingIcno,
                                     retry: true
@@ -279,16 +357,16 @@ async function addUserToAllDevices(user) {
                                 // Could not extract ID, return original error
                                 results.push({
                                     device: device.ip,
-                                    result: response.data.result,
-                                    message: response.data.message
+                                    result: responseData.result,
+                                    message: responseData.message
                                 });
                             }
                         } else {
                             // No duplicate error
                             results.push({
                                 device: device.ip,
-                                result: response.data.result,
-                                message: response.data.message
+                                result: responseData.result,
+                                message: responseData.message
                             });
                         }
                     } else {
@@ -332,6 +410,8 @@ function needsPhotoUpdate(existingPhotoPath, newImageUrl) {
 }
 
 // Updated performLoginAndSync function for main.js
+// Creates ONE record per turnstile_detail with all entry_dates stored as JSON
+// Only pushes ONCE to device with the latest end date
 async function performLoginAndSync() {
     const now = new Date();
     console.log("Starting login and sync process...");
@@ -344,15 +424,23 @@ async function performLoginAndSync() {
         return timestampPart + randomPart;
     }
 
-    function formatDateForDevice(date) {
+    function formatDateForDevice(date, includeTime = true) {
         const d = new Date(date);
         const yyyy = d.getFullYear();
         const mm = String(d.getMonth() + 1).padStart(2, "0");
         const dd = String(d.getDate()).padStart(2, "0");
+        if (!includeTime) return `${yyyy}-${mm}-${dd}`;
         const hh = String(d.getHours()).padStart(2, "0");
         const min = String(d.getMinutes()).padStart(2, "0");
         const ss = String(d.getSeconds()).padStart(2, "0");
         return `${yyyy}-${mm}-${dd} ${hh}:${min}:${ss}`;
+    }
+
+    function getLatestDate(dates) {
+        if (!dates || dates.length === 0) return null;
+        return dates.reduce((latest, current) => {
+            return new Date(current) > new Date(latest) ? current : latest;
+        });
     }
 
     try {
@@ -368,200 +456,262 @@ async function performLoginAndSync() {
         const token = rawToken.includes("|") ? rawToken.split("|")[1].trim() : rawToken.trim();
         console.log("Login successful, token obtained.");
 
-        // 2. Fetch turnstile order details
+        // 2. Fetch turnstile order details with new API format
         const syncResponse = await axios.get(
             `${apiSettings.BACKOFFICE_API_URL}/turnstiles?store_id=${encodeURIComponent(apiSettings.STORE_ID)}`,
             { headers: { Authorization: `Bearer ${token}`, Accept: "application/json" } }
         );
 
-        const turnstileDataList = syncResponse.data?.data || [];
-        if (!turnstileDataList.length) {
+        const customersData = syncResponse.data?.data || [];
+        if (!customersData.length) {
             console.log("No turnstile data to sync.");
             return { success: true, message: "No new users to sync." };
         }
-        console.log(`Found ${turnstileDataList.length} turnstile records to process.`);
+        console.log(`Found ${customersData.length} customers with turnstile data to process.`);
 
-        // 3. Group entries by entry_id to find the latest entry for each person
-        const entriesByPerson = {};
-        turnstileDataList.forEach(entry => {
-            const entryId = entry.entry_id;
-            if (!entryId) return;
-            
-            if (!entriesByPerson[entryId]) {
-                entriesByPerson[entryId] = [];
-            }
-            entriesByPerson[entryId].push(entry);
+        // 3. Collect all turnstile details from API (one record per turnstile_detail)
+        const validOrderDetailIds = new Set();
+        const allTurnstileDetails = [];
+
+        customersData.forEach(customer => {
+            const { customer_id, name, image, turnstile_details } = customer;
+
+            if (!turnstile_details || !Array.isArray(turnstile_details)) return;
+
+            turnstile_details.forEach(detail => {
+                const { turnstile_detail_id, order_detail_id, entry_dates, entry_period } = detail;
+
+                if (!turnstile_detail_id || !order_detail_id) return;
+
+                validOrderDetailIds.add(order_detail_id);
+
+                allTurnstileDetails.push({
+                    customer_id,
+                    customer_name: name,
+                    customer_image: image,
+                    turnstile_detail_id,
+                    order_detail_id,
+                    entry_dates: entry_dates || [],
+                    entry_period: entry_period || 0
+                });
+            });
         });
 
-        // 4. For each person, sort by entry_at and get the latest
-        const latestEntriesMap = {};
-        Object.keys(entriesByPerson).forEach(entryId => {
-            const entries = entriesByPerson[entryId];
-            // Sort by entry_at descending (latest first)
-            entries.sort((a, b) => new Date(b.entry_at) - new Date(a.entry_at));
-            latestEntriesMap[entryId] = entries[0]; // Get the latest entry
+        console.log(`Total turnstile details to process: ${allTurnstileDetails.length}`);
+        console.log(`Valid order_detail_ids from API: ${validOrderDetailIds.size}`);
+
+        // 4. Get all existing entries from database (keyed by order_detail_id)
+        const existingEntries = await new Promise((resolve, reject) => {
+            db.all("SELECT * FROM users WHERE order_detail_id IS NOT NULL", [], (err, rows) => {
+                if (err) reject(err);
+                else resolve(rows || []);
+            });
         });
 
-        // 5. Track updates needed for API
-        const turnstileUpdates = [];
+        const existingEntriesMap = new Map();
+        existingEntries.forEach(entry => {
+            existingEntriesMap.set(entry.order_detail_id, entry);
+        });
 
-        // 6. Process each entry
-        const results = await Promise.all(
-            turnstileDataList.map(async (turnstileData) => {
-                let entryId = turnstileData.entry_id;
-                let needsUpdate = false;
+        // 5. Remove entries from DB that are no longer in the API response
+        const entriesToRemove = existingEntries.filter(entry => {
+            return !validOrderDetailIds.has(entry.order_detail_id);
+        });
 
-                // Generate entry_id if missing
-                if (!entryId) {
-                    entryId = generateUniqueId();
-                    needsUpdate = true;
-                    console.log(`Generated new entry_id: ${entryId} for order_turnstile_id: ${turnstileData.order_turnstile_id}`);
-                    
-                    turnstileUpdates.push({
-                        order_turnstile_id: turnstileData.order_turnstile_id,
-                        order_id: turnstileData.order_id,
-                        entry_id: entryId
-                    });
+        if (entriesToRemove.length > 0) {
+            console.log(`Removing ${entriesToRemove.length} entries that are no longer in API...`);
+
+            for (const entry of entriesToRemove) {
+                try {
+                    await deleteUserFromAllDevicesInternal(entry.id);
+                } catch (err) {
+                    console.error(`Failed to remove user ${entry.id} from devices:`, err.message);
                 }
 
-                // Check if this entry already exists in database
-                const existingEntry = await new Promise((resolve, reject) => {
-                    db.get(
-                        "SELECT * FROM users WHERE order_turnstile_id = ?",
-                        [turnstileData.order_turnstile_id],
-                        (err, row) => {
+                await new Promise((resolve, reject) => {
+                    db.run("DELETE FROM users WHERE record_id = ?", [entry.record_id], function (err) {
+                        if (err) reject(err);
+                        else {
+                            console.log(`Deleted entry with record_id: ${entry.record_id}`);
+                            if (entry.photo) {
+                                try {
+                                    const fullPath = path.join(app.getPath('userData'), entry.photo);
+                                    if (fs.existsSync(fullPath)) {
+                                        fs.unlinkSync(fullPath);
+                                    }
+                                } catch (photoErr) {
+                                    console.error(`Failed to delete photo:`, photoErr.message);
+                                }
+                            }
+                            resolve();
+                        }
+                    });
+                });
+            }
+        }
+
+        // 6. Process each turnstile detail (ONE record per order_detail_id)
+        const results = [];
+        const entryTimeLimitHours = parseInt(apiSettings.ENTRY_TIME_LIMIT) || 2;
+
+        for (const detail of allTurnstileDetails) {
+            const {
+                customer_id,
+                customer_name,
+                customer_image,
+                turnstile_detail_id,
+                order_detail_id,
+                entry_dates,
+                entry_period
+            } = detail;
+
+            const existingEntry = existingEntriesMap.get(order_detail_id);
+
+            // Calculate the latest end date from entry_dates
+            const latestEntryDate = getLatestDate(entry_dates);
+            const latestEntryDateTime = latestEntryDate ? new Date(latestEntryDate + "T23:59:59") : new Date();
+            const exitDateTime = new Date(latestEntryDateTime.getTime() + (entryTimeLimitHours * 60 * 60 * 1000));
+
+            // Sort entry_dates descending (most recent first)
+            const sortedEntryDates = [...entry_dates].sort((a, b) => new Date(b) - new Date(a));
+
+            if (existingEntry) {
+                const newEntryDatesJson = JSON.stringify(sortedEntryDates);
+                const newExitDateStr = formatDateForDevice(exitDateTime);
+
+                // Check change detection
+                const datesChanged = existingEntry.entry_dates !== newEntryDatesJson;
+                const periodChanged = existingEntry.entry_period !== entry_period;
+                const expiryChanged = existingEntry.expired_date_out !== newExitDateStr;
+                const nameChanged = customer_name && existingEntry.name !== customer_name;
+
+                if (!datesChanged && !periodChanged && !expiryChanged && !nameChanged) {
+                    console.log(`No changes for order_detail_id ${order_detail_id}, skipping DB/Device update.`);
+                    results.push({ order_detail_id, updated: false, message: "No changes detected" });
+                    continue;
+                }
+
+                // Update existing entry with new entry_dates and expiry
+                console.log(`Updating existing entry for order_detail_id ${order_detail_id}`);
+
+                await new Promise((resolve, reject) => {
+                    db.run(
+                        `UPDATE users SET 
+                            entry_dates = ?, 
+                            entry_period = ?,
+                            expired_date_out = ?,
+                            name = ?
+                        WHERE order_detail_id = ?`,
+                        [
+                            JSON.stringify(sortedEntryDates),
+                            entry_period,
+                            formatDateForDevice(exitDateTime),
+                            customer_name || existingEntry.name
+                            , order_detail_id],
+                        function (err) {
                             if (err) reject(err);
-                            else resolve(row);
+                            else resolve({ changes: this.changes });
                         }
                     );
                 });
 
-                if (existingEntry) {
-                    console.log(`Entry ${turnstileData.order_turnstile_id} already exists, skipping`);
-                    return { 
-                        entryId, 
-                        skipped: true, 
-                        message: "Entry already exists in database" 
-                    };
-                }
+                // Update device with new expiry date
+                const deviceResults = await updateUserOnAllDevices({
+                    id: existingEntry.id,
+                    name: customer_name || existingEntry.name,
+                    expired_date_out: formatDateForDevice(exitDateTime)
+                });
 
-                // Download and save image
-                let base64Image = null;
-                let photoPath = null;
-
-                if (turnstileData.image) {
-                    const imgBase64 = await getImageBase64(turnstileData.image);
-                    if (imgBase64) {
-                        const cleanBase64 = imgBase64.replace(/^data:image\/\w+;base64,/, "");
-                        base64Image = cleanBase64;
-                        try {
-                            const buffer = Buffer.from(cleanBase64, "base64");
-                            const fileName = `${turnstileData.order_turnstile_id}_${Date.now()}.jpg`;
-                            const uploadsDir = path.join(app.getPath("userData"), "uploads");
-                            fs.mkdirSync(uploadsDir, { recursive: true });
-                            const fullPath = path.join(uploadsDir, fileName);
-                            fs.writeFileSync(fullPath, buffer);
-                            photoPath = path.join("uploads", fileName);
-                        } catch (err) {
-                            console.error("Error saving photo:", err.message);
-                            base64Image = null;
-                        }
-                    }
-                }
-
-                // Calculate expiry dates
-                const entryDate = new Date(turnstileData.entry_at);
-                const entryTimeLimitHours = parseInt(apiSettings.ENTRY_TIME_LIMIT) || 2;
-                const exitDate = new Date(entryDate.getTime() + (entryTimeLimitHours * 60 * 60 * 1000));
-
-                // Determine if this is the latest entry for this person
-                const isLatest = latestEntriesMap[entryId]?.order_turnstile_id === turnstileData.order_turnstile_id ? 1 : 0;
-
-                // Create user object
-                const user = {
-                    id: entryId,
-                    name: `User-${turnstileData.order_id}`,
-                    email: null,
-                    role: "guest",
-                    area: "default",
-                    status: "Paid",
-                    photo: photoPath,
-                    base64: base64Image,
-                    order_detail_id: turnstileData.order_id,
-                    order_id: turnstileData.order_id.toString(),
-                    order_turnstile_id: turnstileData.order_turnstile_id,
-                    start_date: formatDateForDevice(turnstileData.entry_at),
-                    entry_at: formatDateForDevice(turnstileData.entry_at),
-                    expired_date_in: formatDateForDevice(turnstileData.entry_at),
-                    expired_date_out: formatDateForDevice(exitDate),
-                    is_latest: isLatest
-                };
-
-                // Add to database
-                const dbResult = await addUserToDB(user);
-                
-                // Only sync to devices if this is the latest entry for this person
-                let deviceResults = [];
-                if (isLatest) {
-                    // Mark all other entries for this person as not latest
-                    await new Promise((resolve, reject) => {
-                        db.run(
-                            "UPDATE users SET is_latest = 0 WHERE id = ? AND order_turnstile_id != ?",
-                            [entryId, turnstileData.order_turnstile_id],
-                            (err) => {
-                                if (err) reject(err);
-                                else resolve();
-                            }
-                        );
-                    });
-
-                    deviceResults = await addUserToAllDevices(user);
-                    console.log(`Synced latest entry to devices for user ${user.name}`);
-                } else {
-                    console.log(`Skipped device sync for non-latest entry ${turnstileData.order_turnstile_id}`);
-                }
-
-                console.log(`Processed user ${user.name}:`, { dbResult, deviceResults, isLatest });
-
-                return { 
-                    entryId, 
-                    dbResult, 
-                    deviceResults, 
-                    success: true,
-                    needsUpdate,
-                    isLatest 
-                };
-            })
-        );
-
-        // 7. Update entry_ids back to API if there are any
-        if (turnstileUpdates.length > 0) {
-            console.log(`Updating ${turnstileUpdates.length} entry_ids back to API...`);
-            try {
-                const updateResponse = await axios.post(
-                    `${apiSettings.BACKOFFICE_API_URL}/turnstiles`,
-                    { turnstileData: turnstileUpdates },
-                    { 
-                        headers: { 
-                            Authorization: `Bearer ${token}`, 
-                            "Content-Type": "application/json" 
-                        } 
-                    }
-                );
-                console.log("API update response:", updateResponse.data);
-            } catch (updateErr) {
-                console.error("Failed to update entry_ids to API:", updateErr.response?.data || updateErr.message);
+                results.push({
+                    order_detail_id,
+                    updated: true,
+                    deviceResults,
+                    message: "Updated existing entry"
+                });
+                continue;
             }
+
+            // Create new entry
+            const entryId = generateUniqueId();
+
+            // Download and save image
+            let base64Image = null;
+            let photoPath = null;
+
+            if (customer_image) {
+                const imgBase64 = await getImageBase64(customer_image);
+                if (imgBase64) {
+                    const cleanBase64 = imgBase64.replace(/^data:image\/\w+;base64,/, "");
+                    base64Image = cleanBase64;
+                    try {
+                        const buffer = Buffer.from(cleanBase64, "base64");
+                        const fileName = `${customer_id}_${order_detail_id}_${Date.now()}.jpg`;
+                        const uploadsDir = path.join(app.getPath("userData"), "uploads");
+                        fs.mkdirSync(uploadsDir, { recursive: true });
+                        const fullPath = path.join(uploadsDir, fileName);
+                        fs.writeFileSync(fullPath, buffer);
+                        photoPath = path.join("uploads", fileName);
+                    } catch (err) {
+                        console.error("Error saving photo:", err.message);
+                        base64Image = null;
+                    }
+                }
+            }
+
+            // Get the earliest date for start_date
+            const earliestEntryDate = entry_dates.length > 0
+                ? entry_dates.reduce((earliest, current) => new Date(current) < new Date(earliest) ? current : earliest)
+                : formatDateForDevice(now, false);
+
+            // Create user object
+            const user = {
+                id: entryId,
+                name: customer_name || `Customer-${customer_id}`,
+                email: null,
+                role: "guest",
+                area: "default",
+                status: "Paid",
+                photo: photoPath,
+                base64: base64Image,
+                customer_id: customer_id,
+                order_detail_id: order_detail_id,
+                order_id: order_detail_id.toString(),
+                order_turnstile_id: turnstile_detail_id,
+                entry_dates: JSON.stringify(sortedEntryDates),
+                entry_period: entry_period,
+                start_date: formatDateForDevice(new Date(earliestEntryDate + "T00:00:00")),
+                entry_at: formatDateForDevice(new Date(earliestEntryDate + "T00:00:00")),
+                expired_date_in: formatDateForDevice(latestEntryDateTime),
+                expired_date_out: formatDateForDevice(exitDateTime),
+                is_latest: 1
+            };
+
+            // Add to database
+            const dbResult = await addUserToDB(user);
+            console.log(`Added new entry for ${user.name}, order_detail_id: ${order_detail_id}`);
+
+            // Sync to devices (only once per user with the latest end date)
+            const deviceResults = await addUserToAllDevices(user);
+            console.log(`Synced to devices for ${user.name}:`, deviceResults);
+
+            results.push({
+                order_detail_id,
+                entryId,
+                dbResult,
+                deviceResults,
+                success: true,
+                created: true
+            });
         }
 
-        const newUsers = results.filter(r => !r.skipped).length;
-        const skippedUsers = results.filter(r => r.skipped).length;
-        const syncedToDevices = results.filter(r => r.isLatest).length;
+        const newUsers = results.filter(r => r.created).length;
+        const updatedUsers = results.filter(r => r.updated).length;
+        const removedUsers = entriesToRemove.length;
 
-        return { 
-            success: true, 
-            message: `Sync completed. New entries: ${newUsers}, Skipped: ${skippedUsers}, Synced to devices: ${syncedToDevices}`,
-            results 
+        return {
+            success: true,
+            message: `Sync completed. New: ${newUsers}, Updated: ${updatedUsers}, Removed: ${removedUsers}`,
+            results
         };
 
     } catch (err) {
@@ -574,6 +724,124 @@ async function performLoginAndSync() {
     }
 }
 
+// Helper function to delete user from all devices (internal use)
+async function deleteUserFromAllDevicesInternal(idno) {
+    return new Promise((resolve, reject) => {
+        db.all("SELECT ip FROM devices", [], async (err, devices) => {
+            if (err) return reject(err);
+            if (!devices || devices.length === 0) {
+                return resolve([]);
+            }
+
+            const results = [];
+            for (const device of devices) {
+                const url = `http://${device.ip}:9090/deleteDeviceWhiteList`;
+                try {
+                    const status = await getDeviceStatus(device.ip);
+                    if (status === 'online') {
+                        const response = await axios.post(url, {
+                            pass: apiSettings.DEVICE_PASS,
+                            data: {
+                                idno: idno,
+                                usertype: "white"
+                            }
+                        }, {
+                            responseType: 'arraybuffer',
+                            headers: { 'Content-Type': 'application/json; charset=utf-8' }
+                        });
+
+                        const responseText = Buffer.from(response.data).toString('utf8');
+                        const responseData = JSON.parse(responseText);
+
+                        console.log(`Delete from device ${device.ip}:`, {
+                            ...responseData,
+                            message: translateDeviceMessage(responseData.message)
+                        });
+                        results.push({ device: device.ip, result: responseData.result, message: responseData.message });
+                    } else {
+                        results.push({ device: device.ip, result: -1, message: "Device is offline, skipping." });
+                    }
+                } catch (error) {
+                    results.push({ device: device.ip, result: -1, message: `API call failed: ${error.message}` });
+                }
+            }
+            resolve(results);
+        });
+    });
+}
+
+// Helper function to update user on all devices (just update expiry, no image)
+async function updateUserOnAllDevices(user) {
+    return new Promise((resolve, reject) => {
+        db.all("SELECT id, ip FROM devices", [], async (err, devices) => {
+            if (err) return reject({ result: -1, message: "Failed to get devices from DB." });
+            if (devices.length === 0) {
+                return resolve([{ result: 1, message: "No devices found in local database." }]);
+            }
+
+            const results = [];
+
+            for (const device of devices) {
+                const url = `http://${device.ip}:9090/addDeviceWhiteList`;
+
+                try {
+                    const status = await getDeviceStatus(device.ip);
+                    if (status === "online") {
+                        // Update with just the new expiry date (no image change)
+                        const payload = {
+                            totalnum: 1,
+                            pass: apiSettings.DEVICE_PASS,
+                            currentnum: 1,
+                            data: {
+                                usertype: "white",
+                                name: user.name ? user.name.trim().split(/\s+/)[0] : '',
+                                idno: user.id,
+                                icno: user.id,
+                                peopleenddate: user.expired_date_out,
+                            }
+                        };
+
+                        console.log(`Updating user on device ${device.ip}:`, payload);
+
+                        const response = await axios.post(url, payload, {
+                            responseType: 'arraybuffer',
+                            headers: { 'Content-Type': 'application/json; charset=utf-8' }
+                        });
+
+                        const responseText = Buffer.from(response.data).toString('utf8');
+                        const responseData = JSON.parse(responseText);
+
+                        console.log(`Device ${device.ip} update response:`, {
+                            ...responseData,
+                            message: translateDeviceMessage(responseData.message)
+                        });
+
+                        results.push({
+                            device: device.ip,
+                            result: responseData.result,
+                            message: responseData.message
+                        });
+                    } else {
+                        results.push({
+                            device: device.ip,
+                            result: -1,
+                            message: "Device is offline, skipping."
+                        });
+                    }
+                } catch (error) {
+                    results.push({
+                        device: device.ip,
+                        result: -1,
+                        message: `API call failed: ${error.message}`
+                    });
+                }
+            }
+
+            resolve(results);
+        });
+    });
+}
+
 function startApiServer() {
     const appServer = express();
     const PORT = 3000;
@@ -583,24 +851,24 @@ function startApiServer() {
 
     appServer.post('/api/add', async (req, res) => {
         const { icno, user_image } = req.body;
-        
+
         try {
             if (!icno || icno.trim() === "") {
                 throw new Error("IC number (icno) is required");
             }
-            
+
             let photoPath = null;
             if (user_image) {
                 const cleanBase64 = user_image.replace(/^data:image\/\w+;base64,/, "");
                 const buffer = Buffer.from(cleanBase64, "base64");
-                
+
                 const fileName = `${icno}_${Date.now()}.jpg`;
                 const uploadsDir = path.join(app.getPath("userData"), "uploads");
                 fs.mkdirSync(uploadsDir, { recursive: true });
-                
+
                 const fullPath = path.join(uploadsDir, fileName);
                 fs.writeFileSync(fullPath, buffer);
-                
+
                 photoPath = path.join("uploads", fileName);
             }
 
@@ -619,7 +887,7 @@ function startApiServer() {
                 expired_date_in: req.body.expired_date_in || null,
                 expired_date_out: req.body.expired_date_out || null
             };
-            
+
             const dbResult = await addUserToDB(user);
             const deviceResults = await addUserToAllDevices(user);
 
@@ -639,15 +907,15 @@ function startApiServer() {
         console.log(req.body);
         const token = req.query.token;
         const orderData = req.body.orderData;
-    
+
         if (!token) {
             return res.status(400).json({ success: false, message: "Token is required" });
         }
-    
+
         if (!orderData) {
             return res.status(400).json({ success: false, message: "orderData is required" });
         }
-    
+
         try {
             const response = await axios.post(
                 `${apiSettings.BACKOFFICE_API_URL}/orders/store`,
@@ -672,20 +940,20 @@ function startApiServer() {
 
     appServer.post("/api/face", async (req, res) => {
         const { cleanBase64 } = req.body;
-    
+
         if (!cleanBase64) {
             return res.status(400).json({ success: false, message: "cleanBase64 (base64) is required" });
         }
-    
+
         try {
             const results = await new Promise((resolve, reject) => {
                 db.all("SELECT id, ip FROM devices", [], async (err, devices) => {
                     if (err) return reject({ result: -1, message: "Failed to get devices from DB." });
-    
+
                     if (devices.length === 0) {
                         return resolve([{ result: 1, message: "No devices found in local database." }]);
                     }
-    
+
                     const results = [];
                     for (const device of devices) {
                         const url = `http://${device.ip}:9090/getPictureFeature`;
@@ -715,11 +983,11 @@ function startApiServer() {
                             });
                         }
                     }
-    
+
                     resolve(results);
                 });
             });
-    
+
             res.json({ success: true, devices: results });
         } catch (err) {
             console.error("❌ Error in /api/face:", err);
@@ -729,11 +997,11 @@ function startApiServer() {
 
     appServer.post('/api/getdetails', async (req, res) => {
         const { idNo } = req.body;
-    
+
         if (!idNo) {
             return res.status(400).json({ success: false, message: 'idNo is required in the request body.' });
         }
-    
+
         try {
             const devices = await new Promise((resolve, reject) => {
                 db.all("SELECT ip FROM devices", [], (err, rows) => {
@@ -741,11 +1009,11 @@ function startApiServer() {
                     resolve(rows);
                 });
             });
-    
+
             if (devices.length === 0) {
                 return res.status(200).json({ success: true, message: "No devices found in local database.", details: [] });
             }
-    
+
             const allDeviceResults = [];
             for (const device of devices) {
                 const url = `http://${device.ip}:9090/getDeviceWhiteListDetailByIdNum`;
@@ -778,13 +1046,13 @@ function startApiServer() {
                     });
                 }
             }
-    
+
             res.status(200).json({
                 success: true,
                 message: "User details retrieved from devices.",
                 details: allDeviceResults
             });
-    
+
         } catch (err) {
             console.error("❌ Error in /api/getdetails:", err);
             res.status(500).json({ success: false, message: "Failed to retrieve user details.", error: err.message });
@@ -792,78 +1060,121 @@ function startApiServer() {
     });
 
     appServer.post('/api/offline', async (req, res) => {
-    const createUserLists = req.body.createUserLists || [];
+        const createUserLists = req.body.createUserLists || [];
 
-    if (!Array.isArray(createUserLists) || createUserLists.length === 0) {
-        return res.status(400).json({ success: false, message: "No users to process" });
-    }
-
-    const results = [];
-
-    for (const userData of createUserLists) {
-        const { icno, user_image } = userData;
-
-        try {
-            if (!icno || icno.trim() === "") {
-                results.push({ icno, success: false, message: "IC number (icno) is required" });
-                continue;
-            }
-
-            let photoPath = null;
-            if (user_image && user_image.trim() !== "") {
-                const cleanBase64 = user_image.replace(/^data:image\/\w+;base64,/, "");
-                const buffer = Buffer.from(cleanBase64, "base64");
-
-                const fileName = `${icno}_${Date.now()}.jpg`;
-                const uploadsDir = path.join(app.getPath("userData"), "uploads");
-                fs.mkdirSync(uploadsDir, { recursive: true });
-
-                const fullPath = path.join(uploadsDir, fileName);
-                fs.writeFileSync(fullPath, buffer);
-
-                photoPath = path.join("uploads", fileName);
-            }
-
-            const user = {
-                id: icno,
-                name: userData.name || icno,
-                email: userData.email || null,
-                role: "guest",
-                area: "default",
-                status: "Unpaid", // Changed from null to "Unpaid"
-                base64: user_image || null,
-                photo: photoPath || null,
-                order_detail_id: userData.order_detail_id || null,
-                order_id: userData.order_id || null,
-                order_turnstile_id: null,
-                start_date: userData.start_date || null,
-                entry_at: userData.start_date || null,
-                expired_date_in: userData.start_date || null,
-                expired_date_out: userData.expired_date_out || null,
-                is_latest: 1 // Mark as latest entry
-            };
-
-            // Add user to database
-            const dbResult = await addUserToDB(user);
-
-            results.push({
-                icno,
-                success: true,
-                db: dbResult,
-                message: "User added to database with Unpaid status"
-            });
-
-        } catch (err) {
-            results.push({ icno, success: false, message: err.message });
+        if (!Array.isArray(createUserLists) || createUserLists.length === 0) {
+            return res.status(400).json({ success: false, message: "No users to process" });
         }
-    }
 
-    res.json({
-        success: true,
-        message: "Offline batch processing completed",
-        results
+        const results = [];
+
+        for (const userData of createUserLists) {
+            const { icno, user_image } = userData;
+
+            try {
+                if (!icno || icno.trim() === "") {
+                    results.push({ icno, success: false, message: "IC number (icno) is required" });
+                    continue;
+                }
+
+                let photoPath = null;
+                if (user_image && user_image.trim() !== "") {
+                    const cleanBase64 = user_image.replace(/^data:image\/\w+;base64,/, "");
+                    const buffer = Buffer.from(cleanBase64, "base64");
+
+                    const fileName = `${icno}_${Date.now()}.jpg`;
+                    const uploadsDir = path.join(app.getPath("userData"), "uploads");
+                    fs.mkdirSync(uploadsDir, { recursive: true });
+
+                    const fullPath = path.join(uploadsDir, fileName);
+                    fs.writeFileSync(fullPath, buffer);
+
+                    photoPath = path.join("uploads", fileName);
+                }
+
+                const user = {
+                    id: icno,
+                    name: userData.name || icno,
+                    email: userData.email || null,
+                    role: "guest",
+                    area: "default",
+                    status: "Unpaid", // Changed from null to "Unpaid"
+                    base64: user_image || null,
+                    photo: photoPath || null,
+                    order_detail_id: userData.order_detail_id || null,
+                    order_id: userData.order_id || null,
+                    order_turnstile_id: null,
+                    start_date: userData.start_date || null,
+                    entry_at: userData.start_date || null,
+                    expired_date_in: userData.start_date || null,
+                    expired_date_out: userData.expired_date_out || null,
+                    is_latest: 1 // Mark as latest entry
+                };
+
+                // Add user to database
+                const dbResult = await addUserToDB(user);
+
+                results.push({
+                    icno,
+                    success: true,
+                    db: dbResult,
+                    message: "User added to database with Unpaid status"
+                });
+
+            } catch (err) {
+                results.push({ icno, success: false, message: err.message });
+            }
+        }
+
+        res.json({
+            success: true,
+            message: "Offline batch processing completed",
+            results
+        });
     });
-});
+
+    appServer.post('/api/webhook/device', (req, res) => {
+        console.log('\n=================================================');
+        console.log('📥 INCOMING REQUEST FROM THIRD-PARTY DEVICE');
+        console.log('=================================================');
+        console.log('Timestamp:', new Date().toISOString());
+
+        // Extract only the specific fields
+        const { icNum, id, idNum, time } = req.body;
+
+        console.log('\n--- EXTRACTED DATA ---');
+        console.log('icNum:', icNum);
+        console.log('id:', id);
+        console.log('idNum:', idNum);
+        console.log('time:', time);
+        console.log('\n=================================================\n');
+
+        // Send a success response back to the device
+        res.status(200).json({
+            success: true,
+            message: 'Data received successfully',
+            timestamp: new Date().toISOString()
+        });
+    });
+
+    appServer.get('/api/webhook/device', (req, res) => {
+        console.log('\n=================================================');
+        console.log('📥 INCOMING GET REQUEST FROM THIRD-PARTY DEVICE');
+        console.log('=================================================');
+        console.log('Timestamp:', new Date().toISOString());
+        console.log('\n--- REQUEST HEADERS ---');
+        console.log(JSON.stringify(req.headers, null, 2));
+        console.log('\n--- REQUEST QUERY PARAMS ---');
+        console.log(JSON.stringify(req.query, null, 2));
+        console.log('\n=================================================\n');
+
+        // Send a success response back to the device
+        res.status(200).json({
+            success: true,
+            message: 'GET request received successfully',
+            timestamp: new Date().toISOString()
+        });
+    });
 
 
     appServer.listen(PORT, '0.0.0.0', () => {
@@ -984,12 +1295,12 @@ ipcMain.handle('addUserToDevices', async (event, recordId) => {
 ipcMain.handle('db:updateUser', async (event, user) => {
     try {
         const { id, name, start_date, expired_date_in, expired_date_out } = user;
-        
+
         // Get the latest entry for this user
         const latestUser = await new Promise((resolve, reject) => {
             db.get(
-                "SELECT * FROM users WHERE id = ? AND is_latest = 1 ORDER BY entry_at DESC LIMIT 1", 
-                [id], 
+                "SELECT * FROM users WHERE id = ? AND is_latest = 1 ORDER BY entry_at DESC LIMIT 1",
+                [id],
                 (err, row) => {
                     if (err) reject(err);
                     else resolve(row);
@@ -1006,7 +1317,7 @@ ipcMain.handle('db:updateUser', async (event, user) => {
             db.run(
                 `UPDATE users SET name = ?, start_date = ?, expired_date_in = ?, expired_date_out = ? WHERE record_id = ?`,
                 [name, start_date, expired_date_in, expired_date_out, latestUser.record_id],
-                function(err) {
+                function (err) {
                     if (err) {
                         console.error('Error updating user in database:', err);
                         reject(err);
@@ -1058,8 +1369,8 @@ ipcMain.handle('db:updateUser', async (event, user) => {
 
         if (devices.length === 0) {
             console.log('⚠️ No devices found to sync');
-            return { 
-                success: true, 
+            return {
+                success: true,
                 dbChanges: 1,
                 deviceResults: [],
                 message: 'User updated in database, but no devices to sync'
@@ -1075,7 +1386,7 @@ ipcMain.handle('db:updateUser', async (event, user) => {
 
             try {
                 const status = await getDeviceStatus(device.ip);
-                
+
                 if (status === "online") {
                     const payload = {
                         totalnum: 1,
@@ -1100,7 +1411,7 @@ ipcMain.handle('db:updateUser', async (event, user) => {
                     console.log(`📤 Sending update to device ${device.ip}`);
 
                     const response = await axios.post(url, payload);
-                    
+
                     deviceResults.push({
                         device: device.ip,
                         result: response.data.result,
@@ -1173,7 +1484,7 @@ function getUserFromDB(recordId) {
 ipcMain.handle('updateUserStatus', async (event, recordId, status) => {
     return new Promise((resolve, reject) => {
         const sql = "UPDATE users SET status = ? WHERE record_id = ?";
-        db.run(sql, [status, recordId], function(err) {
+        db.run(sql, [status, recordId], function (err) {
             if (err) return reject(err);
             resolve({ success: true });
         });
@@ -1215,14 +1526,25 @@ ipcMain.handle('api:addUserToAllDevices', async (event, user) => {
                             currentnum: 1,
                             data: {
                                 usertype: "white",
-                                name: user.name,
+                                name: user.name ? user.name.trim().split(/\s+/)[0] : '',
                                 idno: user.id,
                                 peoplestartdate: user.start_date,
                                 peopleenddate: user.expired_date_out,
                                 picData1: user.base64
                             }
+                        }, {
+                            responseType: 'arraybuffer',
+                            headers: { 'Content-Type': 'application/json; charset=utf-8' }
                         });
-                        results.push({ device: device.ip, result: response.data.result, message: response.data.message });
+
+                        const responseText = Buffer.from(response.data).toString('utf8');
+                        const responseData = JSON.parse(responseText);
+
+                        console.log(`Device ${device.ip} response:`, {
+                            ...responseData,
+                            message: translateDeviceMessage(responseData.message)
+                        });
+                        results.push({ device: device.ip, result: responseData.result, message: responseData.message });
                     } else {
                         results.push({ device: device.ip, result: -1, message: "Device is offline, skipping." });
                     }
@@ -1249,12 +1571,23 @@ ipcMain.handle('api:deleteUserFromAllDevices', async (event, idno) => {
                 try {
                     const response = await axios.post(url, {
                         pass: apiSettings.DEVICE_PASS,
-                        data: { 
-                            idno: idno, 
-                            usertype: "white" 
+                        data: {
+                            idno: idno,
+                            usertype: "white"
                         }
+                    }, {
+                        responseType: 'arraybuffer',
+                        headers: { 'Content-Type': 'application/json; charset=utf-8' }
                     });
-                    results.push({ device: device.ip, result: response.data.result, message: response.data.message });
+
+                    const responseText = Buffer.from(response.data).toString('utf8');
+                    const responseData = JSON.parse(responseText);
+
+                    console.log(`Delete from device ${device.ip}:`, {
+                        ...responseData,
+                        message: translateDeviceMessage(responseData.message)
+                    });
+                    results.push({ device: device.ip, result: responseData.result, message: responseData.message });
                 } catch (error) {
                     results.push({ device: device.ip, result: -1, message: `API call failed: ${error.message}` });
                 }
@@ -1271,8 +1604,15 @@ ipcMain.handle('api:openGate', async (event, deviceId) => {
 
             const url = `http://${device.ip}:9090/setDeviceRemoteOpen`;
             try {
-                const response = await axios.post(url, { pass: apiSettings.DEVICE_PASS });
-                resolve(response.data);
+                const response = await axios.post(url, { pass: apiSettings.DEVICE_PASS }, {
+                    responseType: 'arraybuffer',
+                    headers: { 'Content-Type': 'application/json; charset=utf-8' }
+                });
+
+                const responseText = Buffer.from(response.data).toString('utf8');
+                const responseData = JSON.parse(responseText);
+
+                resolve(responseData);
             } catch (error) {
                 reject({ result: -1, message: `Failed to open gate: ${error.message}` });
             }
@@ -1290,8 +1630,15 @@ ipcMain.handle('api:restartDevice', async (event, deviceId) => {
                 const response = await axios.post(url, {
                     pass: apiSettings.DEVICE_PASS,
                     data: { type: "DelayReboot", value: 5 }
+                }, {
+                    responseType: 'arraybuffer',
+                    headers: { 'Content-Type': 'application/json; charset=utf-8' }
                 });
-                resolve(response.data);
+
+                const responseText = Buffer.from(response.data).toString('utf8');
+                const responseData = JSON.parse(responseText);
+
+                resolve(responseData);
             } catch (error) {
                 reject({ result: -1, message: `Failed to restart device: ${error.message}` });
             }
@@ -1310,7 +1657,7 @@ ipcMain.handle('fs:savePhoto', async (event, { id, photoBase64 }) => {
         const base64Data = photoBase64.replace(/^data:image\/\w+;base64,/, "");
 
         fs.writeFileSync(filePath, Buffer.from(base64Data, 'base64'));
-        
+
         return path.join('uploads', `${id}.jpg`);
     } catch (error) {
         console.error('Failed to save photo:', error);
@@ -1337,24 +1684,27 @@ ipcMain.handle('db:getUsers', async () => {
 
 ipcMain.handle('db:addUser', (event, user) => {
     return new Promise((resolve, reject) => {
-        const { 
-            id, name, email, role, area, status, photo, 
-            order_detail_id, order_id, order_turnstile_id,
-            start_date, entry_at, expired_date_in, expired_date_out 
+        const {
+            id, name, email, role, area, status, photo,
+            customer_id, order_detail_id, order_id, order_turnstile_id,
+            entry_dates, entry_period,
+            start_date, entry_at, expired_date_in, expired_date_out
         } = user;
-        
+
         db.run(
             `INSERT INTO users (
                 id, name, email, role, area, status, photo, 
-                order_detail_id, order_id, order_turnstile_id,
+                customer_id, order_detail_id, order_id, order_turnstile_id,
+                entry_dates, entry_period,
                 start_date, entry_at, expired_date_in, expired_date_out, is_latest
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
             [
-                id, name, email, role, area, status, photo, 
-                order_detail_id, order_id, order_turnstile_id,
+                id, name, email, role, area, status, photo,
+                customer_id, order_detail_id, order_id, order_turnstile_id,
+                entry_dates, entry_period,
                 start_date, entry_at || start_date, expired_date_in, expired_date_out
-            ], 
-            function(err) {
+            ],
+            function (err) {
                 if (err) reject(err);
                 resolve({ record_id: this.lastID, id: id });
             }
@@ -1367,7 +1717,7 @@ ipcMain.handle('db:deleteUser', (event, recordId) => {
         db.get("SELECT photo FROM users WHERE record_id = ?", [recordId], (err, user) => {
             if (err) return reject(err);
 
-            db.run(`DELETE FROM users WHERE record_id = ?`, [recordId], function(err) {
+            db.run(`DELETE FROM users WHERE record_id = ?`, [recordId], function (err) {
                 if (err) return reject(err);
 
                 if (user && user.photo) {
@@ -1418,7 +1768,7 @@ ipcMain.handle('db:getSettings', async () => {
 
 ipcMain.handle('db:setSetting', (event, key, value) => {
     return new Promise((resolve, reject) => {
-        db.run("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", [key, value], function(err) {
+        db.run("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", [key, value], function (err) {
             if (err) {
                 reject(err);
             } else {
@@ -1442,7 +1792,7 @@ ipcMain.handle('db:addArea', (event, area) => {
     return new Promise((resolve, reject) => {
         const { name, description, accessLevel } = area;
         db.run(`INSERT INTO areas (name, description, accessLevel) VALUES (?, ?, ?)`,
-            [name, description, accessLevel], function(err) {
+            [name, description, accessLevel], function (err) {
                 if (err) reject(err);
                 resolve({ id: this.lastID });
             }
@@ -1454,7 +1804,7 @@ ipcMain.handle('db:updateArea', (event, area) => {
     return new Promise((resolve, reject) => {
         const { id, name, description, accessLevel } = area;
         db.run(`UPDATE areas SET name = ?, description = ?, accessLevel = ? WHERE id = ?`,
-            [name, description, accessLevel, id], function(err) {
+            [name, description, accessLevel, id], function (err) {
                 if (err) reject(err);
                 resolve({ changes: this.changes });
             }
@@ -1464,7 +1814,7 @@ ipcMain.handle('db:updateArea', (event, area) => {
 
 ipcMain.handle('db:deleteArea', (event, id) => {
     return new Promise((resolve, reject) => {
-        db.run(`DELETE FROM areas WHERE id = ?`, [id], function(err) {
+        db.run(`DELETE FROM areas WHERE id = ?`, [id], function (err) {
             if (err) reject(err);
             resolve({ changes: this.changes });
         });
@@ -1484,7 +1834,7 @@ ipcMain.handle('db:addDevice', (event, device) => {
     return new Promise((resolve, reject) => {
         const { name, ip, area, status, lastSeen } = device;
         db.run(`INSERT INTO devices (name, ip, area, status, lastSeen) VALUES (?, ?, ?, ?, ?)`,
-            [name, ip, area, status, lastSeen], function(err) {
+            [name, ip, area, status, lastSeen], function (err) {
                 if (err) reject(err);
                 resolve({ id: this.lastID });
             }
@@ -1496,7 +1846,7 @@ ipcMain.handle('db:updateDevice', (event, device) => {
     return new Promise((resolve, reject) => {
         const { id, name, ip, area, status, lastSeen } = device;
         db.run(`UPDATE devices SET name = ?, ip = ?, area = ?, status = ?, lastSeen = ? WHERE id = ?`,
-            [name, ip, area, status, lastSeen, id], function(err) {
+            [name, ip, area, status, lastSeen, id], function (err) {
                 if (err) reject(err);
                 resolve({ changes: this.changes });
             }
@@ -1506,7 +1856,7 @@ ipcMain.handle('db:updateDevice', (event, device) => {
 
 ipcMain.handle('db:deleteDevice', (event, id) => {
     return new Promise((resolve, reject) => {
-        db.run(`DELETE FROM devices WHERE id = ?`, [id], function(err) {
+        db.run(`DELETE FROM devices WHERE id = ?`, [id], function (err) {
             if (err) reject(err);
             resolve({ changes: this.changes });
         });

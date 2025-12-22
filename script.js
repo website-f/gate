@@ -17,29 +17,35 @@ function hideLoading() {
 
 // Corrected formatDate function to handle 'YYYY-MM-DD HH:mm:ss'
 function formatDate(dateStr) {
-    if (!dateStr) {
-        return 'N/A';
-    }
-    
-    // Split the date and time components
-    const [datePart, timePart] = dateStr.split(' ');
-    const [year, month, day] = datePart.split('-');
-    const [hours, minutes, seconds] = timePart.split(':');
+    if (!dateStr) return 'N/A';
 
-    // Create a new Date object using the components (safer than string parsing)
-    const d = new Date(year, month - 1, day, hours, minutes, seconds);
+    // Handle if passing a Date object
+    let d;
+    if (dateStr instanceof Date) {
+        d = dateStr;
+    } else {
+        // Ensure string and handle ISO format
+        let s = String(dateStr).trim();
+        if (s.includes('T')) s = s.replace('T', ' ').split('.')[0];
 
-    // Check if the date is valid. If not, return 'Invalid Date'.
-    if (isNaN(d.getTime())) {
-        return 'Invalid Date';
+        // If it looks like just a date "YYYY-MM-DD"
+        if (!s.includes(' ')) s += ' 00:00:00';
+
+        const [datePart, timePart] = s.split(' ');
+        if (!datePart) return 'N/A';
+
+        const [year, month, day] = datePart.split('-');
+        let [hours, minutes, seconds] = (timePart || '00:00:00').split(':');
+
+        d = new Date(year, (month || 1) - 1, day || 1, hours || 0, minutes || 0, seconds || 0);
     }
+
+    if (isNaN(d.getTime())) return 'Invalid Date';
 
     // Format the date to DD-MM-YY
     const formattedDay = String(d.getDate()).padStart(2, '0');
     const formattedMonth = String(d.getMonth() + 1).padStart(2, '0');
     const formattedYear = String(d.getFullYear()).slice(-2);
-    
-    // Get time with seconds
     const formattedHours = String(d.getHours()).padStart(2, '0');
     const formattedMinutes = String(d.getMinutes()).padStart(2, '0');
     const formattedSeconds = String(d.getSeconds()).padStart(2, '0');
@@ -47,7 +53,7 @@ function formatDate(dateStr) {
     return `${formattedDay}-${formattedMonth}-${formattedYear} ${formattedHours}:${formattedMinutes}:${formattedSeconds}`;
 }
 
-document.addEventListener('DOMContentLoaded', async function() {
+document.addEventListener('DOMContentLoaded', async function () {
     initializeNavigation();
     setupEventListeners();
     await initializeDashboard();
@@ -57,7 +63,7 @@ document.addEventListener('DOMContentLoaded', async function() {
 function initializeNavigation() {
     const navLinks = document.querySelectorAll('.nav-link');
     navLinks.forEach(link => {
-        link.addEventListener('click', async function(e) {
+        link.addEventListener('click', async function (e) {
             e.preventDefault();
             const page = this.dataset.page;
             showPage(page);
@@ -76,19 +82,19 @@ function initializeNavigation() {
 
 function formatDateForInput(dateStr) {
     if (!dateStr) return '';
-    
+
     const [datePart, timePart] = dateStr.split(' ');
     if (!datePart || !timePart) return '';
-    
+
     const [year, month, day] = datePart.split('-');
     const [hours, minutes] = timePart.split(':');
-    
+
     return `${year}-${month}-${day}T${hours}:${minutes}`;
 }
 
 function formatDateFromInput(inputDate) {
     if (!inputDate) return '';
-    
+
     const date = new Date(inputDate);
     const year = date.getFullYear();
     const month = String(date.getMonth() + 1).padStart(2, '0');
@@ -96,7 +102,7 @@ function formatDateFromInput(inputDate) {
     const hours = String(date.getHours()).padStart(2, '0');
     const minutes = String(date.getMinutes()).padStart(2, '0');
     const seconds = String(date.getSeconds()).padStart(2, '0');
-    
+
     return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
 }
 
@@ -196,7 +202,7 @@ function closeModal() {
 
 // Event listeners setup
 function setupEventListeners() {
-    document.getElementById('modal-overlay').addEventListener('click', function(e) {
+    document.getElementById('modal-overlay').addEventListener('click', function (e) {
         if (e.target === this) {
             closeModal();
         }
@@ -204,7 +210,7 @@ function setupEventListeners() {
 
     const confirmInput = document.getElementById('confirm-input');
     if (confirmInput) {
-        confirmInput.addEventListener('input', function() {
+        confirmInput.addEventListener('input', function () {
             const confirmBtn = document.getElementById('confirm-action-btn');
             if (this.value.toLowerCase() === 'confirm') {
                 confirmBtn.disabled = false;
@@ -218,15 +224,15 @@ function setupEventListeners() {
 }
 
 function setupSearchHandlers() {
-    document.getElementById('user-search').addEventListener('input', function() {
+    document.getElementById('user-search').addEventListener('input', function () {
         filterTable('users-table', this.value);
     });
 
-    document.getElementById('area-search').addEventListener('input', function() {
+    document.getElementById('area-search').addEventListener('input', function () {
         filterTable('areas-table', this.value);
     });
 
-    document.getElementById('device-search').addEventListener('input', function() {
+    document.getElementById('device-search').addEventListener('input', function () {
         filterTable('devices-table', this.value);
     });
 }
@@ -502,10 +508,10 @@ async function populateDevices() {
         const formattedDate = now.toLocaleDateString();
         const formattedTime = now.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false });
         const lastSeen = `${formattedDate}, ${formattedTime}`;
-        
+
         // Update the local database with the new status
         await window.electronAPI.updateDevice({ ...device, status, lastSeen });
-        
+
         return { ...device, status, lastSeen };
     }));
 
@@ -537,7 +543,7 @@ async function populateDevices() {
         </tr>
     `;
     }).join('');
-    
+
     hideLoading();
     await updateStats(); // Call updateStats after populating the table
 }
@@ -636,7 +642,7 @@ async function updateDevice() {
     const name = document.getElementById('edit-device-name').value;
     const ip = document.getElementById('edit-device-ip').value;
     const area = document.getElementById('edit-device-area').value;
-    
+
     if (!name || !ip || !area) {
         showNotification('Please fill all required fields!', 'error');
         return;
@@ -671,7 +677,7 @@ async function saveDevice() {
         showNotification('Please fill all required fields!', 'error');
         return;
     }
-    
+
     // if (!password) {
     //     showNotification('Device password is required!', 'error');
     //     return;
@@ -754,10 +760,10 @@ function isExpired(dateStr) {
     const [datePart, timePart] = dateStr.split(' ');
     const [year, month, day] = datePart.split('-');
     const [hours, minutes, seconds] = timePart ? timePart.split(':') : [0, 0, 0];
-    
+
     const targetDate = new Date(year, month - 1, day, hours, minutes, seconds);
     const now = new Date();
-    
+
     // Compare based on actual timestamp
     return targetDate.getTime() < now.getTime();
 }
@@ -777,160 +783,229 @@ async function populateUsers() {
     }
 
     if (users.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="7" class="text-center">No users found. Add a new user to get started.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="7" class="text-center">No users found. Add a new user or click API Sync to get started.</td></tr>';
         hideLoading();
         return;
     }
 
-
-    // Group users by entry_id (id)
+    // Group by customer_id or name
     const groupedUsers = {};
     users.forEach(user => {
-        if (!groupedUsers[user.id]) {
-            groupedUsers[user.id] = [];
-        }
-        groupedUsers[user.id].push(user);
+        const key = user.customer_id ? `cust_${user.customer_id}` : `name_${user.name}`;
+        if (!groupedUsers[key]) groupedUsers[key] = [];
+        groupedUsers[key].push(user);
     });
 
-    // Sort each group by entry_at descending (latest first) and mark latest
-    Object.keys(groupedUsers).forEach(entryId => {
-        groupedUsers[entryId].sort((a, b) => {
-            const dateA = new Date(a.entry_at || a.start_date);
-            const dateB = new Date(b.entry_at || b.start_date);
-            return dateB - dateA;
-        });
-    });
+    // Get today's date for comparison
+    const today = new Date();
+    const todayStr = today.toISOString().split('T')[0];
 
     const rows = [];
 
-    Object.keys(groupedUsers).forEach(entryId => {
-        const userGroup = groupedUsers[entryId];
-        const latestUser = userGroup[0]; // The most recent entry
-        const entryCount = userGroup.length;
+    // Process each group
+    Object.values(groupedUsers).forEach(group => {
+        // Sort group members by entry_at desc
+        group.sort((a, b) => new Date(b.entry_at || 0) - new Date(a.entry_at || 0));
 
-       const isUserExpired = isExpired(latestUser.expired_date_out);
-let statusText = latestUser.status;
-let statusClass;
+        const mainUser = group[0]; // Representative for the main row (usually the latest)
 
-if (isUserExpired) {
-    statusText = 'Expired';
-    statusClass = 'status-expired';
-} else if (latestUser.status === 'Paid') {
-    statusClass = 'status-active';
-} else if (latestUser.status === 'Unpaid') {
-    statusText = 'Unpaid';
-    statusClass = 'status-inactive';
-} else {
-    statusClass = 'status-inactive';
-}
-        let userPhotoPath;
-        if (latestUser.photo) {
-            userPhotoPath = `file://${userDataPath.replaceAll('\\', '/')}/${latestUser.photo.replaceAll('\\', '/')}`;
+        // Aggregate info
+        let totalUsed = 0;
+        let totalLimit = 0;
+        let maxExitDate = '';
+
+        let accordionContent = '';
+
+        group.forEach(u => {
+            let dates = [];
+            try { dates = u.entry_dates ? JSON.parse(u.entry_dates) : []; } catch (e) { }
+            dates.sort((a, b) => new Date(b) - new Date(a)); // Descending dates
+
+            const used = dates.length;
+            const limit = u.entry_period || 0;
+            totalUsed += used;
+            totalLimit += limit;
+
+            // Find max expiry
+            if (!maxExitDate || (u.expired_date_out && new Date(u.expired_date_out) > new Date(maxExitDate))) {
+                maxExitDate = u.expired_date_out;
+            }
+
+            // FILTER: Show STRICTLY dates within THIS WEEK (Mon-Sun)
+            const now = new Date();
+            const currentDay = now.getDay() || 7;
+            const weekStart = new Date(now);
+            weekStart.setHours(0, 0, 0, 0);
+            if (currentDay !== 1) weekStart.setDate(weekStart.getDate() - (currentDay - 1));
+
+            const weekEnd = new Date(weekStart);
+            weekEnd.setDate(weekStart.getDate() + 6);
+            weekEnd.setHours(23, 59, 59, 999);
+
+            const visibleDates = dates.filter(d => {
+                const dateObj = new Date(d);
+                return dateObj >= weekStart && dateObj <= weekEnd;
+            });
+            const hiddenCount = dates.length - visibleDates.length;
+
+            // Build Date Badges for visible dates
+            const entryDatesHtml = visibleDates.map(date => {
+                const dateObj = new Date(date);
+                const isToday = date === todayStr;
+                const isPast = date < todayStr;
+
+                let dateClass = '';
+                let badgeHtml = '';
+
+                if (isToday) {
+                    dateClass = 'entry-date-today';
+                    badgeHtml = '<span class="date-badge date-badge-today">Today</span>';
+                } else if (isPast) { // Should not happen given filter, but safe to keep
+                    dateClass = 'entry-date-expired';
+                    badgeHtml = '<span class="date-badge date-badge-expired">Expired</span>';
+                } else {
+                    dateClass = 'entry-date-upcoming';
+                    badgeHtml = '<span class="date-badge date-badge-upcoming">Upcoming</span>';
+                }
+
+                return `
+                    <div class="entry-date-item ${dateClass}" style="display: flex; align-items: center; gap: 8px; padding: 4px 8px; border-radius: 4px; ${isPast ? 'opacity: 0.6;' : ''} font-size: 0.8rem; background: #fff;">
+                        <i class="fas fa-calendar-day" style="color: ${isToday ? '#16a34a' : isPast ? '#9ca3af' : '#3b82f6'};"></i>
+                        <span>${formatEntryDate(date)}</span>
+                        ${badgeHtml}
+                    </div>
+                `;
+            }).join('');
+
+            // History Link
+            const historyLink = hiddenCount > 0
+                ? `<div style="width:100%; margin-top:4px;">
+                      <span style="font-size:0.75rem; color:#9ca3af; font-style:italic;">${hiddenCount} past entries hidden. </span>
+                      <a href="#" onclick="viewUser('${mainUser.record_id}'); return false;" style="font-size:0.75rem; color:#3b82f6; text-decoration:none;">View Full History</a>
+                   </div>`
+                : '';
+
+            // Append to accordion
+            accordionContent += `
+                <div class="order-group-item" style="margin-bottom: 12px; padding: 8px; border: 1px solid #e5e7eb; border-radius: 6px; background-color: #f9fafb;">
+                    <div style="font-weight: 600; font-size: 0.85rem; color: #374151; margin-bottom: 6px; display: flex; justify-content: space-between;">
+                        <span>Order #${u.order_detail_id || 'N/A'} <span style="font-weight:400; color:#6b7280;">(Turnstile: ${u.order_turnstile_id || 'N/A'})</span></span>
+                        <span style="font-size: 0.8rem; background: #e5e7eb; padding: 2px 6px; border-radius: 4px;">${used}/${limit} entries</span>
+                    </div>
+                    <div style="display: flex; flex-wrap: wrap; gap: 8px;">
+                        ${entryDatesHtml.length > 0 ? entryDatesHtml : '<span style="font-size:0.8rem; color:#9ca3af; padding:4px;">No entries this week</span>'}
+                        ${historyLink}
+                    </div>
+                </div>
+            `;
+        });
+
+        // Determine Status based on maxExitDate
+        const isUserExpired = isExpired(maxExitDate);
+        let statusText = mainUser.status;
+        let statusClass;
+        if (isUserExpired) {
+            statusText = 'Expired';
+            statusClass = 'status-expired';
+        } else if (mainUser.status === 'Paid') {
+            statusClass = 'status-active';
         } else {
-            userPhotoPath = './defuser.jpg';
+            statusText = 'Unpaid/Inactive';
+            statusClass = 'status-inactive';
         }
 
-        const syncButton = latestUser.status !== 'Paid' 
-            ? `<button class="btn-icon btn-sync" id="sync-btn-${latestUser.record_id}" onclick="syncUserToDevices('${latestUser.record_id}')" title="Sync to Device">
-                   <i class="fas fa-sync-alt"></i>
-               </button>` 
-            : '';
+        // Photo
+        let userPhotoPath = mainUser.photo
+            ? `file://${userDataPath.replaceAll('\\', '/')}/${mainUser.photo.replaceAll('\\', '/')}`
+            : './defuser.jpg';
 
-        // Badge to show multiple entries
-        const entryBadge = entryCount > 1 
-            ? `<span class="entry-count-badge" title="This person has ${entryCount} entries">${entryCount}x</span>` 
-            : '';
+        // Sync Button logic (using mainUser record)
+        const syncButton = `<button class="btn-icon btn-sync" id="sync-btn-${mainUser.record_id}" onclick="syncUserToDevices('${mainUser.record_id}')" title="Sync this User Group">
+                               <i class="fas fa-sync-alt"></i>
+                           </button>`;
 
-        // Main row for the latest entry
+        // Add Main Row
         rows.push(`
-        <tr class="user-group-main" data-entry-id="${entryId}">
-            <td>
-                <input type="checkbox" class="user-checkbox" value="${latestUser.record_id}">
-            </td>
+        <tr class="user-group-main" data-record-id="${mainUser.record_id}">
+            <td><input type="checkbox" class="user-checkbox" value="${mainUser.record_id}"></td>
             <td>
                 <div style="display: flex; align-items: center; gap: 12px;">
-                    <img src="${userPhotoPath}" alt="${latestUser.name}" 
-                          style="width: 40px; height: 40px; border-radius: 50%; object-fit: cover;">
+                    <img src="${userPhotoPath}" alt="${mainUser.name}" style="width: 40px; height: 40px; border-radius: 50%; object-fit: cover;">
                     <div>
-                        <div style="display: flex; align-items: center; gap: 8px;">
-                            <span>${latestUser.name}</span>
-                            ${entryBadge}
-                        </div>
-                        <small style="color: #6b7280; font-size: 0.75rem;">ID: ${entryId}</small>
+                        <div style="font-weight: 500;">${mainUser.name}</div>
+                        <small style="color: #6b7280; font-size: 0.75rem;">ID: ${mainUser.id}</small>
                     </div>
                 </div>
             </td>
-             <td>${latestUser.order_detail_id || 'N/A'}</td>
-            <td>${latestUser.order_id || 'N/A'}</td>
-            <td>${formatDate(latestUser.expired_date_out)}</td>
+            <td>Multiple</td>
+            <td>
+                <span class="entry-count-badge" title="Total Used: ${totalUsed} / Limit: ${totalLimit}">
+                    ${totalUsed}/${totalLimit}
+                </span>
+            </td>
+            <td>${formatDate(maxExitDate)}</td>
             <td><span class="status-badge ${statusClass}">${statusText}</span></td>
             <td>
                 <div class="action-buttons">
-                    ${entryCount > 1 ? `<button class="btn-icon btn-expand" onclick="toggleUserHistory('${entryId}')" title="View History">
+                    <button class="btn-icon btn-expand" onclick="toggleEntryDates('${mainUser.record_id}')" title="View All Orders">
                         <i class="fas fa-chevron-down"></i>
-                    </button>` : ''}
-                    <button class="btn-icon btn-view" onclick="viewUser('${latestUser.record_id}')" title="View User">
+                    </button>
+                    <button class="btn-icon btn-view" onclick="viewUser('${mainUser.record_id}')" title="View Details">
                         <i class="fas fa-eye"></i>
                     </button>
-                    <button class="btn-icon btn-edit" onclick="openEditUserModal('${latestUser.record_id}')" title="Edit User">
-                        <i class="fas fa-edit"></i>
-                    </button>
-                    <button class="btn-icon btn-delete" onclick="deleteUserGroup('${entryId}')" title="Delete All Entries">
+                    <button class="btn-icon btn-delete" onclick="deleteUser('${mainUser.record_id}')" title="Delete Representative">
                         <i class="fas fa-trash"></i>
                     </button>
                     ${syncButton}
                 </div>
             </td>
         </tr>
+        <tr class="entry-dates-row" data-record-id="${mainUser.record_id}" style="display: none; background-color: #fff;">
+            <td></td>
+            <td colspan="6" style="padding: 0;">
+                <div style="padding: 16px; background-color: #f8fafc; border-top: 1px solid #e5e7eb; box-shadow: inset 0 2px 4px rgba(0,0,0,0.03);">
+                    <div style="margin-bottom: 12px; color: #475569; font-weight: 500; font-size: 0.9rem;">
+                        <i class="fas fa-layer-group"></i> Order Details &amp; Entry History
+                    </div>
+                    ${accordionContent}
+                </div>
+            </td>
+        </tr>
         `);
-
-        // Add hidden rows for history if there are multiple entries
-        if (entryCount > 1) {
-            userGroup.slice(1).forEach((historicalUser, index) => {
-                const historyPhotoPath = historicalUser.photo 
-                    ? `file://${userDataPath.replaceAll('\\', '/')}/${historicalUser.photo.replaceAll('\\', '/')}` 
-                    : './defuser.jpg';
-
-                rows.push(`
-                <tr class="user-history-row" data-entry-id="${entryId}" style="display: none; background-color: #f9fafb;">
-                    <td></td>
-                    <td>
-                        <div style="display: flex; align-items: center; gap: 12px; padding-left: 24px;">
-                            <img src="${historyPhotoPath}" alt="${historicalUser.name}" 
-                                  style="width: 32px; height: 32px; border-radius: 50%; object-fit: cover; opacity: 0.7;">
-                            <div>
-                                <span style="color: #6b7280; font-size: 0.875rem;">Previous Entry #${index + 1}</span>
-                            </div>
-                        </div>
-                    </td>
-                    <td style="color: #6b7280;">${historicalUser.order_id || 'N/A'}</td>
-                    <td style="color: #6b7280;">${historicalUser.order_detail_id || 'N/A'}</td>
-                    <td style="color: #6b7280;">${formatDate(historicalUser.entry_at)}</td>
-                    <td><span class="status-badge status-inactive">Old</span></td>
-                    <td>
-                        <div class="action-buttons">
-                            <button class="btn-icon btn-view" onclick="viewUser('${historicalUser.record_id}')" title="View Entry">
-                                <i class="fas fa-eye"></i>
-                            </button>
-                            <button class="btn-icon btn-delete" onclick="deleteUserEntry('${historicalUser.record_id}')" title="Delete This Entry">
-                                <i class="fas fa-trash"></i>
-                            </button>
-                        </div>
-                    </td>
-                </tr>
-                `);
-            });
-        }
     });
 
     tbody.innerHTML = rows.join('');
     hideLoading();
 }
 
+// Helper function to format entry date
+function formatEntryDate(dateStr) {
+    if (!dateStr) return 'N/A';
+    const date = new Date(dateStr);
+    const options = { weekday: 'short', year: 'numeric', month: 'short', day: 'numeric' };
+    return date.toLocaleDateString('en-US', options);
+}
+
+// Toggle entry dates visibility
+function toggleEntryDates(recordId) {
+    const dateRows = document.querySelectorAll(`tr.entry-dates-row[data-record-id="${recordId}"]`);
+    const expandButton = document.querySelector(`tr.user-group-main[data-record-id="${recordId}"] .btn-expand i`);
+
+    dateRows.forEach(row => {
+        if (row.style.display === 'none') {
+            row.style.display = '';
+            if (expandButton) expandButton.className = 'fas fa-chevron-up';
+        } else {
+            row.style.display = 'none';
+            if (expandButton) expandButton.className = 'fas fa-chevron-down';
+        }
+    });
+}
+
 function toggleUserHistory(entryId) {
     const historyRows = document.querySelectorAll(`tr.user-history-row[data-entry-id="${entryId}"]`);
     const expandButton = document.querySelector(`tr.user-group-main[data-entry-id="${entryId}"] .btn-expand i`);
-    
+
     historyRows.forEach(row => {
         if (row.style.display === 'none') {
             row.style.display = '';
@@ -945,11 +1020,11 @@ function toggleUserHistory(entryId) {
 async function deleteUserGroup(entryId) {
     const users = await window.electronAPI.getUsers();
     const userGroup = users.filter(u => u.id === entryId);
-    
+
     if (userGroup.length === 0) return;
 
     const entryCount = userGroup.length;
-    const message = entryCount > 1 
+    const message = entryCount > 1
         ? `Delete all ${entryCount} entries for this person? This will remove them from all devices.`
         : `Delete this user? This will remove them from all devices.`;
 
@@ -959,11 +1034,11 @@ async function deleteUserGroup(entryId) {
         async () => {
             // Delete from devices
             const apiResults = await window.electronAPI.deleteUserFromAllDevices(entryId);
-            
+
             // Delete all entries from database
             const recordIds = userGroup.map(u => u.record_id);
             await window.electronAPI.bulkDeleteUsers(recordIds);
-            
+
             showNotification(`Deleted all entries for user ${entryId}`);
             await populateUsers();
             await updateStats();
@@ -985,6 +1060,32 @@ async function deleteUserEntry(recordId) {
     );
 }
 
+// Delete user by record_id (removes from devices too)
+async function deleteUser(recordId) {
+    const users = await window.electronAPI.getUsers();
+    const user = users.find(u => u.record_id == recordId);
+
+    if (!user) {
+        showNotification('User not found', 'error');
+        return;
+    }
+
+    showConfirmationModal(
+        'Delete User',
+        `Delete ${user.name}? This will remove them from all devices.`,
+        async () => {
+            // Delete from devices first
+            await window.electronAPI.deleteUserFromAllDevices(user.id);
+
+            // Delete from database
+            await window.electronAPI.deleteUser(recordId);
+
+            showNotification('User deleted successfully');
+            await populateUsers();
+            await updateStats();
+        }
+    );
+}
 
 async function syncUserToDevices(recordId) {
     const btn = document.getElementById(`sync-btn-${recordId}`);
@@ -998,7 +1099,7 @@ async function syncUserToDevices(recordId) {
         // Fetch the user from database
         const users = await window.electronAPI.getUsers();
         const user = users.find(u => u.record_id == recordId);
-        
+
         if (!user) {
             alert('User not found in database');
             return;
@@ -1018,7 +1119,7 @@ async function syncUserToDevices(recordId) {
             if (result.result === 0) {
                 hasSuccess = true;
             }
-            
+
             // Check if this result contains an updated ID from duplicate detection
             if (result.retry && result.updatedId && result.result === 0) {
                 updatedId = result.updatedId;
@@ -1030,7 +1131,7 @@ async function syncUserToDevices(recordId) {
             // If ID was changed due to duplicate detection, update the database
             if (updatedId && updatedId !== user.id) {
                 console.log(`Updating user ID in database from ${user.id} to ${updatedId}`);
-                
+
                 // Update the user's ID in the database
                 await window.electronAPI.updateUser({
                     id: updatedId,
@@ -1055,7 +1156,7 @@ async function syncUserToDevices(recordId) {
                 .filter(r => r.result !== 0)
                 .map(r => `${r.device}: ${r.message}`)
                 .join('\n');
-            
+
             alert(`Failed to sync user to devices:\n${errors}`);
         }
     } catch (err) {
@@ -1118,79 +1219,184 @@ async function populateAreaDropdownForUser() {
 
 async function viewUser(recordId) {
     const users = await window.electronAPI.getUsers();
-    const user = users.find(u => u.record_id == recordId);
-    if (!user) {
+    const targetUser = users.find(u => u.record_id == recordId);
+
+    if (!targetUser) {
         showNotification("User not found!", "error");
         return;
     }
 
-    // Get all entries for this person
-    const allEntries = users.filter(u => u.id === user.id);
-    const entryCount = allEntries.length;
+    // Group users by customer_id or name
+    const groupKey = targetUser.customer_id ? `cust_${targetUser.customer_id}` : `name_${targetUser.name}`;
+    const userGroup = users.filter(u => {
+        const uKey = u.customer_id ? `cust_${u.customer_id}` : `name_${u.name}`;
+        return uKey === groupKey;
+    });
 
-    currentUser = user;
+    // Sort by entry_at desc
+    userGroup.sort((a, b) => new Date(b.entry_at || 0) - new Date(a.entry_at || 0));
+
+    const mainUser = userGroup[0];
     const userDataPath = await window.electronAPI.getUserDataPath();
-    let userPhotoPath;
-    if (user.photo) {
-        userPhotoPath = `file://${userDataPath.replaceAll('\\', '/')}/${user.photo.replaceAll('\\', '/')}`;
-    } else {
-        userPhotoPath = './defuser.jpg';
+    const userPhotoPath = mainUser.photo
+        ? `file://${userDataPath.replaceAll('\\', '/')}/${mainUser.photo.replaceAll('\\', '/')}`
+        : './defuser.jpg';
+
+    // Calculate strict "This Week" (Mon-Sun)
+    const now = new Date();
+    const currentDay = now.getDay() || 7;
+    const weekStart = new Date(now);
+    weekStart.setHours(0, 0, 0, 0);
+    if (currentDay !== 1) weekStart.setDate(weekStart.getDate() - (currentDay - 1));
+    const weekEnd = new Date(weekStart);
+    weekEnd.setDate(weekStart.getDate() + 6);
+    weekEnd.setHours(23, 59, 59, 999);
+
+    // Filter Active Dates for "This Week"
+    let activeDates = [];
+    try { activeDates = mainUser.entry_dates ? JSON.parse(mainUser.entry_dates) : []; } catch (e) { }
+
+    const thisWeekDates = activeDates.filter(d => {
+        const dateObj = new Date(d);
+        return dateObj >= weekStart && dateObj <= weekEnd;
+    }).sort();
+
+    const todayStr = new Date().toISOString().split('T')[0];
+
+    const activeDatesHtml = thisWeekDates.length > 0
+        ? thisWeekDates.map(date => {
+            const isToday = date === todayStr;
+            return `
+                <div class="entry-card-tiny ${isToday ? 'today' : ''}">
+                    <div class="date-row">${formatEntryDate(date)}</div>
+                    <div class="time-row">
+                        <i class="far fa-clock"></i> 
+                        All Day
+                    </div>
+                    <div class="status-indicator" style="color: ${isToday ? '#16a34a' : '#2563eb'}">
+                        ${isToday ? 'Today' : 'Upcoming'}
+                    </div>
+                </div>`;
+        }).join('')
+        : '<div style="color:#64748b; font-style:italic; padding:12px; grid-column: 1/-1;">No entries scheduled for this week.</div>';
+
+    // Prepare History (Limit to 5)
+    const historyList = userGroup.slice(0, 5);
+    const hasMore = userGroup.length > 5;
+
+    let historyHtml = '';
+    historyList.forEach(u => {
+        let dates = [];
+        try { dates = u.entry_dates ? JSON.parse(u.entry_dates) : []; } catch (e) { }
+        dates.sort((a, b) => new Date(b) - new Date(a));
+
+        const badgesHtml = dates.map(date => {
+            const isToday = date === todayStr;
+            const isUpcoming = date > todayStr;
+            const badgeClass = isToday ? 'date-badge-today' : isUpcoming ? 'date-badge-upcoming' : 'date-badge-expired';
+            return `<div class="entry-date-item" style="padding:4px 8px; border-radius:4px; border:1px solid #eee; display:flex; align-items:center; gap:6px; font-size: 0.8rem;">
+                        <span class="date-badge ${badgeClass}" style="zoom: 0.8;">${isToday ? 'TODAY' : isUpcoming ? 'FUTURE' : 'PAST'}</span>
+                        <span>${formatEntryDate(date)}</span>
+                    </div>`;
+        }).join('');
+
+        const isActive = u.record_id === mainUser.record_id;
+
+        historyHtml += `
+            <div class="history-item-modern">
+                <div class="history-summary" onclick="this.nextElementSibling.classList.toggle('active');">
+                    <div>
+                        <div style="font-weight:700; color:#334155; display:flex; align-items:center; gap:8px; font-size: 0.9rem;">
+                            <i class="fas fa-receipt" style="color: #94a3b8;"></i>
+                            Order #${u.order_detail_id || 'N/A'}
+                            ${isActive ? '<span style="font-size:0.65rem; background:#dbeafe; color:#1e40af; padding:2px 8px; border-radius:4px; text-transform: uppercase; font-weight: 800;">Active</span>' : ''}
+                        </div>
+                        <div style="font-size:0.75rem; color:#64748b; margin-top:2px; margin-left: 20px;">
+                            <i class="fas fa-door-open"></i> ${u.order_turnstile_id || 'N/A'} • ${dates.length} entries
+                        </div>
+                    </div>
+                    <i class="fas fa-chevron-down" style="color:#94a3b8; font-size: 0.8rem;"></i>
+                </div>
+                <div class="history-dates">
+                    <div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap:6px;">
+                        ${badgesHtml || '<span style="color:#94a3b8; font-size:0.8rem;">No entries recorded</span>'}
+                    </div>
+                </div>
+            </div>
+        `;
+    });
+
+    if (hasMore) {
+        historyHtml += `<div style="padding:12px; text-align:center; color:#94a3b8; font-size:0.85rem; border-top:1px solid #f1f5f9; background: #fafafa;">
+            + ${userGroup.length - 5} older orders hidden
+        </div>`;
     }
 
-    const entryInfo = entryCount > 1 
-        ? `<div class="info-item">
-            <span class="info-label">Total Entries:&nbsp;</span>
-            <span class="info-value"> ${entryCount}</span>
-        </div>`
-        : '';
-
     const userDetails = document.getElementById('user-details');
+    const usedEntries = activeDates.length;
+    const entryLimit = mainUser.entry_period || 0;
+
     userDetails.innerHTML = `
-        <div class="user-photo">
-            <img src="${userPhotoPath}" alt="${user.name}">
-            <p class="text-center">${user.name}</p>
-        </div>
-        <div class="user-info">
-            <div class="info-item">
-                <span class="info-label">Entry ID:&nbsp;</span>
-                <span class="info-value"> ${user.id}</span>
+        <div class="user-details-modern">
+            <div class="user-header-section">
+                <img src="${userPhotoPath}" alt="${mainUser.name}" class="user-avatar">
+                <div class="user-title">
+                    <h2>${mainUser.name}</h2>
+                    <div class="user-badges">
+                        <span class="status-badge status-${mainUser.status === 'Paid' ? 'active' : 'inactive'}">${mainUser.status}</span>
+                        <span class="badge-tag badge-id">
+                            <i class="fas fa-fingerprint"></i> ${mainUser.id}
+                        </span>
+                    </div>
+                </div>
             </div>
-            ${entryInfo}
-            <div class="info-item">
-                <span class="info-label">Full Name:&nbsp;</span>
-                <span class="info-value"> ${user.name}</span>
+
+            <div class="detail-grid">
+                <div class="detail-card">
+                    <div class="detail-label">Record ID</div>
+                    <div class="detail-value">#${mainUser.record_id}</div>
+                </div>
+                <div class="detail-card">
+                    <div class="detail-label">Email Address</div>
+                    <div class="detail-value">${mainUser.email || '--'}</div>
+                </div>
+                <div class="detail-card">
+                    <div class="detail-label">Order Reference</div>
+                    <div class="detail-value">${mainUser.order_detail_id || 'N/A'}</div>
+                </div>
+                <div class="detail-card">
+                    <div class="detail-label">Turnstile Node</div>
+                    <div class="detail-value">${mainUser.order_turnstile_id || 'N/A'}</div>
+                </div>
+                <div class="detail-card">
+                    <div class="detail-label">Entry Usage</div>
+                    <div class="detail-value">${usedEntries} / ${entryLimit}</div>
+                </div>
+                <div class="detail-card">
+                    <div class="detail-label">Validity Period</div>
+                    <div class="detail-value">${formatDate(mainUser.start_date)}</div>
+                </div>
             </div>
-            <div class="info-item">
-                <span class="info-label">Email:&nbsp;</span>
-                <span class="info-value"> ${user.email || 'N/A'}</span>
+
+            <div class="section-wrapper">
+                <div class="section-header">
+                    <i class="fas fa-calendar-week" style="color: #2563eb;"></i>
+                    Entries This Week
+                    <span style="margin-left: auto; font-size: 0.7rem; color: #94a3b8;">${formatDate(weekStart).split(' ')[0]} - ${formatDate(weekEnd).split(' ')[0]}</span>
+                </div>
+                <div class="entries-grid-modern">
+                    ${activeDatesHtml}
+                </div>
             </div>
-            <div class="info-item">
-                <span class="info-label">Role:&nbsp;</span>
-                <span class="info-value"> ${user.role}</span>
-            </div>
-            <div class="info-item">
-                <span class="info-label">Status: &nbsp;</span>
-                <span class="status-badge status-${user.status === 'Paid' ? 'active' : 'inactive'}">${user.status}</span>
-            </div>
-            <div class="info-item">
-                <span class="info-label">Order Turnstile ID:&nbsp;</span>
-                <span class="info-value"> ${user.order_turnstile_id || 'N/A'}</span>
-            </div>
-            <div class="info-item">
-                <span class="info-label">Order ID:&nbsp;</span>
-                <span class="info-value"> ${user.order_id || 'N/A'}</span>
-            </div>
-            <div class="info-item">
-                <span class="info-label">Entry At:&nbsp;</span>
-                <span class="info-value"> ${formatDate(user.entry_at)}</span>
-            </div>
-            <div class="info-item">
-                <span class="info-label">Start Date:&nbsp;</span>
-                <span class="info-value"> ${formatDate(user.start_date)}</span>
-            </div>
-            <div class="info-item">
-                <span class="info-label">Expired Date (Out):&nbsp;</span>
-                <span class="info-value"> ${formatDate(user.expired_date_out)}</span>
+
+            <div class="section-wrapper" style="padding-bottom: 0;">
+                <div class="section-header">
+                    <i class="fas fa-history" style="color: #64748b;"></i>
+                    Purchase History
+                </div>
+                <div class="history-list-modern">
+                    ${historyHtml}
+                </div>
             </div>
         </div>
     `;
@@ -1202,7 +1408,7 @@ async function openEditUserModal(recordId) {
     try {
         const users = await window.electronAPI.getUsers();
         const user = users.find(u => u.record_id == recordId);
-        
+
         if (!user) {
             showNotification('User not found', 'error');
             return;
@@ -1210,21 +1416,21 @@ async function openEditUserModal(recordId) {
 
         // Set the user ID (entry_id, not record_id)
         document.getElementById('edit-user-id').value = user.id;
-        
+
         // Set the user name
         document.getElementById('edit-user-name').value = user.name || '';
-        
+
         // Convert dates to datetime-local format
         if (user.start_date) {
             const startDate = convertToDatetimeLocal(user.start_date);
             document.getElementById('edit-user-start-date').value = startDate;
         }
-        
+
         if (user.expired_date_in) {
             const expiredIn = convertToDatetimeLocal(user.expired_date_in);
             document.getElementById('edit-user-expired-in').value = expiredIn;
         }
-        
+
         if (user.expired_date_out) {
             const expiredOut = convertToDatetimeLocal(user.expired_date_out);
             document.getElementById('edit-user-expired-out').value = expiredOut;
@@ -1242,10 +1448,10 @@ async function openEditUserModal(recordId) {
 // Helper function to convert date string to datetime-local format
 function convertToDatetimeLocal(dateString) {
     if (!dateString) return '';
-    
+
     // Handle format: "YYYY-MM-DD HH:mm:ss"
     let date;
-    
+
     if (dateString.includes('T')) {
         // ISO format
         date = new Date(dateString);
@@ -1258,25 +1464,25 @@ function convertToDatetimeLocal(dateString) {
     } else {
         date = new Date(dateString);
     }
-    
+
     if (isNaN(date.getTime())) {
         return '';
     }
-    
+
     // Convert to YYYY-MM-DDTHH:mm format
     const year = date.getFullYear();
     const month = String(date.getMonth() + 1).padStart(2, '0');
     const day = String(date.getDate()).padStart(2, '0');
     const hours = String(date.getHours()).padStart(2, '0');
     const minutes = String(date.getMinutes()).padStart(2, '0');
-    
+
     return `${year}-${month}-${day}T${hours}:${minutes}`;
 }
 
 // Helper function to convert datetime-local to device format
 function convertToDeviceFormat(datetimeLocal) {
     if (!datetimeLocal) return '';
-    
+
     const date = new Date(datetimeLocal);
     const year = date.getFullYear();
     const month = String(date.getMonth() + 1).padStart(2, '0');
@@ -1284,7 +1490,7 @@ function convertToDeviceFormat(datetimeLocal) {
     const hours = String(date.getHours()).padStart(2, '0');
     const minutes = String(date.getMinutes()).padStart(2, '0');
     const seconds = String(date.getSeconds()).padStart(2, '0');
-    
+
     return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
 }
 
@@ -1358,7 +1564,7 @@ async function deleteUser(recordId) {
         async () => {
             // Check if this is the last entry for this user
             const allUserEntries = users.filter(u => u.id === user.id);
-            
+
             if (allUserEntries.length === 1) {
                 // Last entry - delete from devices too
                 const apiResults = await window.electronAPI.deleteUserFromAllDevices(user.id);
@@ -1367,13 +1573,13 @@ async function deleteUser(recordId) {
             } else {
                 // Multiple entries exist - just delete this one
                 await window.electronAPI.deleteUser(recordId);
-                
+
                 // If this was the latest entry, mark the next most recent as latest
                 if (user.is_latest === 1) {
                     const sortedEntries = allUserEntries
                         .filter(u => u.record_id !== recordId)
                         .sort((a, b) => new Date(b.entry_at) - new Date(a.entry_at));
-                    
+
                     if (sortedEntries.length > 0) {
                         // Update the next entry to be latest and sync to devices
                         const nextLatest = sortedEntries[0];
@@ -1381,10 +1587,10 @@ async function deleteUser(recordId) {
                         await window.electronAPI.addUserToDevices(nextLatest.record_id);
                     }
                 }
-                
+
                 showNotification('Entry deleted successfully!');
             }
-            
+
             await populateUsers();
             await updateStats();
         }
@@ -1457,7 +1663,7 @@ async function saveUser() {
     }
 
     const cleanBase64 = capturedPhotoDataUrl.replace(/^data:image\/\w+;base64,/, "");
-    
+
     // Format current date for device
     const formatDateForDevice = (date) => {
         const d = new Date(date);
@@ -1546,16 +1752,16 @@ function openCamera() {
             facingMode: 'user'
         }
     })
-    .then(stream => {
-        currentStream = stream;
-        video.srcObject = stream;
-        cameraContainer.style.display = 'block';
-        document.getElementById('photo-preview').style.display = 'none';
-    })
-    .catch(err => {
-        console.error('Error accessing camera:', err);
-        showNotification('Could not access camera. Please check permissions.', 'error');
-    });
+        .then(stream => {
+            currentStream = stream;
+            video.srcObject = stream;
+            cameraContainer.style.display = 'block';
+            document.getElementById('photo-preview').style.display = 'none';
+        })
+        .catch(err => {
+            console.error('Error accessing camera:', err);
+            showNotification('Could not access camera. Please check permissions.', 'error');
+        });
 }
 
 function closeCamera() {
@@ -1612,7 +1818,7 @@ async function handleFileUpload(event) {
     }
 
     const reader = new FileReader();
-    reader.onload = async function(e) {
+    reader.onload = async function (e) {
         const originalDataUrl = e.target.result;
         console.log("Original uploaded photo size:", (originalDataUrl.length * 0.75 / 1024).toFixed(2) + " KB");
 
