@@ -844,7 +844,8 @@ async function performLoginAndSync() {
                         name: customer_name || existingEntry.name,
                         start_date: newStartDateStr,
                         expired_date_out: finalExitDateStr,
-                        base64Override: newBase64Image || null
+                        base64Override: newBase64Image || null,
+                        apiStartDate: newStartDateStr // triggers date-protection check on device
                     });
                     const anySuccess = Array.isArray(deviceResults)
                         ? deviceResults.some(r => r.result === 0 || r.result === 1)
@@ -1031,7 +1032,39 @@ async function deleteUserFromAllDevicesInternal(idno) {
     });
 }
 
+// Helper: query device for a user's current end date by idno
+async function queryDeviceUserEndDate(deviceIp, idno) {
+    try {
+        const url = `http://${deviceIp}:9090/getDeviceWhiteListDetailByIdNum`;
+        const response = await axios.post(url, {
+            pass: apiSettings.DEVICE_PASS,
+            data: { idno: idno }
+        }, {
+            responseType: 'arraybuffer',
+            headers: { 'Content-Type': 'application/json; charset=utf-8' },
+            timeout: 5000
+        });
+        const responseText = Buffer.from(response.data).toString('utf8');
+        const responseData = JSON.parse(responseText);
+
+        if (responseData.result === 0 && responseData.data) {
+            const userData = responseData.data;
+            const endDate = userData.peopleenddate || userData.peopleEndDate || null;
+            const startDate = userData.peoplestartdate || userData.peopleStartDate || null;
+            console.log(`📋 Device ${deviceIp} user ${idno}: start=${startDate}, end=${endDate}`);
+            return { found: true, peopleenddate: endDate, peoplestartdate: startDate };
+        }
+        return { found: false };
+    } catch (err) {
+        console.log(`Could not query device ${deviceIp} for user ${idno}: ${err.message}`);
+        return { found: false };
+    }
+}
+
 // Helper function to update user on all devices (dates + photo)
+// When apiStartDate is provided (from API sync), checks device end date first:
+//   - If apiStartDate < device enddate → skip (device has longer access, e.g. 30-day pass)
+//   - If apiStartDate >= device enddate → overwrite (device pass expired or ending)
 async function updateUserOnAllDevices(user) {
     return new Promise((resolve, reject) => {
         db.all("SELECT id, ip FROM devices", [], async (err, devices) => {
@@ -1060,14 +1093,49 @@ async function updateUserOnAllDevices(user) {
                 }
             }
 
+            const apiStartDate = user.apiStartDate || null; // Only set during API sync
             const results = [];
 
             for (const device of devices) {
                 try {
                     const status = await getDeviceStatus(device.ip);
                     if (status === "online") {
-                        // Step 1: Delete the user from device first so both start and end dates are refreshed
                         const deleteUrl = `http://${device.ip}:9090/deleteDeviceWhiteList`;
+                        const addUrl = `http://${device.ip}:9090/addDeviceWhiteList`;
+
+                        // === API SYNC DATE PROTECTION ===
+                        // When called from API sync (apiStartDate provided), check the device's
+                        // current end date BEFORE overwriting. If the device already has a longer
+                        // pass (e.g. 30-day kiosk pass), don't overwrite it.
+                        if (apiStartDate) {
+                            // Query device for current user data by user.id
+                            let deviceEndDate = null;
+
+                            const deviceInfo = await queryDeviceUserEndDate(device.ip, user.id);
+                            if (deviceInfo.found && deviceInfo.peopleenddate) {
+                                deviceEndDate = deviceInfo.peopleenddate;
+                            }
+
+                            // Compare dates: only overwrite if API start >= device end (device pass expired/ending)
+                            if (deviceEndDate) {
+                                const apiStart = new Date(apiStartDate);
+                                const devEnd = new Date(deviceEndDate);
+
+                                if (apiStart < devEnd) {
+                                    console.log(`⏭️ SKIP device ${device.ip}: device enddate (${deviceEndDate}) is AFTER API startdate (${apiStartDate}). Device has longer access.`);
+                                    results.push({
+                                        device: device.ip,
+                                        result: 0,
+                                        message: `Skipped: device has longer access (end: ${deviceEndDate}, API start: ${apiStartDate})`
+                                    });
+                                    continue;
+                                } else {
+                                    console.log(`✅ Device ${device.ip}: device enddate (${deviceEndDate}) <= API startdate (${apiStartDate}). Proceeding with overwrite.`);
+                                }
+                            }
+                        }
+
+                        // Step 1: Delete the user from device first so both start and end dates are refreshed
                         try {
                             await axios.post(deleteUrl, {
                                 pass: apiSettings.DEVICE_PASS,
@@ -1085,7 +1153,6 @@ async function updateUserOnAllDevices(user) {
                         }
 
                         // Step 2: Re-add the user with updated start and end dates
-                        const addUrl = `http://${device.ip}:9090/addDeviceWhiteList`;
                         const payload = {
                             totalnum: 1,
                             pass: apiSettings.DEVICE_PASS,
@@ -1124,13 +1191,35 @@ async function updateUserOnAllDevices(user) {
 
                         // Handle duplicate face: old face data exists under a different idno on the device
                         if (responseData.result === 1 && responseData.message && responseData.message.includes('照片重复')) {
-                            console.log(`Duplicate face detected on device ${device.ip}. Extracting old ID to delete...`);
+                            console.log(`Duplicate face detected on device ${device.ip}. Extracting old ID...`);
                             const regex = /与[^,]+,(\d+)照片重复/;
                             const match = responseData.message.match(regex);
 
                             if (match && match[1]) {
                                 const existingIcno = match[1];
-                                console.log(`Found old device ID: ${existingIcno}. Deleting old entry then re-adding...`);
+
+                                // === API SYNC: check the OLD entry's end date before overwriting ===
+                                if (apiStartDate) {
+                                    const oldDeviceInfo = await queryDeviceUserEndDate(device.ip, existingIcno);
+                                    if (oldDeviceInfo.found && oldDeviceInfo.peopleenddate) {
+                                        const apiStart = new Date(apiStartDate);
+                                        const oldDevEnd = new Date(oldDeviceInfo.peopleenddate);
+
+                                        if (apiStart < oldDevEnd) {
+                                            console.log(`⏭️ SKIP device ${device.ip}: old entry ${existingIcno} enddate (${oldDeviceInfo.peopleenddate}) is AFTER API startdate (${apiStartDate}). Keeping longer access.`);
+                                            results.push({
+                                                device: device.ip,
+                                                result: 0,
+                                                message: `Skipped: old entry ${existingIcno} has longer access (end: ${oldDeviceInfo.peopleenddate}, API start: ${apiStartDate})`
+                                            });
+                                            continue;
+                                        } else {
+                                            console.log(`✅ Device ${device.ip}: old entry ${existingIcno} enddate (${oldDeviceInfo.peopleenddate}) <= API startdate (${apiStartDate}). Overwriting.`);
+                                        }
+                                    }
+                                }
+
+                                console.log(`Deleting old entry ${existingIcno} then re-adding...`);
 
                                 // Delete the old entry that has the conflicting face
                                 try {
