@@ -63,28 +63,22 @@
           "arch": ["x64"]
         }
       ],
-      "icon": "build/icon.ico",
       "artifactName": "${productName}-Setup-${version}.${ext}"
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "allowElevation": true,
-      "installerIcon": "build/icon.ico",
-      "uninstallerIcon": "build/icon.ico",
-      "installerHeaderIcon": "build/icon.ico",
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "Gate Controller System"
     },
     "mac": {
       "target": ["dmg"],
-      "icon": "build/icon.icns",
       "category": "public.app-category.business"
     },
     "linux": {
       "target": ["AppImage"],
-      "icon": "build/icon.png",
       "category": "Utility"
     }
   }

@@ -8,9 +8,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     deleteUserFromAllDevices: (idno) => ipcRenderer.invoke('api:deleteUserFromAllDevices', idno),
     openGate: (deviceId) => ipcRenderer.invoke('api:openGate', deviceId),
     restartDevice: (deviceId) => ipcRenderer.invoke('api:restartDevice', deviceId),
-    
+    updateOrderStatus: (orderNumber) => ipcRenderer.invoke('api:updateOrderStatus', orderNumber),
+
     performSync: () => ipcRenderer.invoke('api:performSync'),
     addUserToDevices: (recordId) => ipcRenderer.invoke('addUserToDevices', recordId),
+    resyncUserToDevices: (recordId) => ipcRenderer.invoke('api:resyncUserToDevices', recordId),
     updateUserStatus: (recordId, status) => ipcRenderer.invoke('updateUserStatus', recordId, status),
     
     // File System Handlers

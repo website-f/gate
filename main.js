@@ -87,7 +87,7 @@ app.on('window-all-closed', () => {
 
 function setupDatabaseAndLoadSettings() {
     db.serialize(() => {
-        // Updated users table with entry_dates JSON column
+        // Updated users table with entry_dates JSON column and face_group_id for duplicate face grouping
         db.run(`CREATE TABLE IF NOT EXISTS users (
             record_id INTEGER PRIMARY KEY AUTOINCREMENT,
             id TEXT NOT NULL,
@@ -108,6 +108,8 @@ function setupDatabaseAndLoadSettings() {
             expired_date_in TEXT,
             expired_date_out TEXT,
             is_latest INTEGER DEFAULT 0,
+            face_group_id TEXT,
+            device_synced INTEGER DEFAULT 0,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )`);
 
@@ -123,6 +125,16 @@ function setupDatabaseAndLoadSettings() {
             }
         });
         db.run(`ALTER TABLE users ADD COLUMN customer_id INTEGER`, (err) => {
+            if (err && !err.message.includes('duplicate column')) {
+                console.error('Migration error:', err.message);
+            }
+        });
+        db.run(`ALTER TABLE users ADD COLUMN face_group_id TEXT`, (err) => {
+            if (err && !err.message.includes('duplicate column')) {
+                console.error('Migration error:', err.message);
+            }
+        });
+        db.run(`ALTER TABLE users ADD COLUMN device_synced INTEGER DEFAULT 0`, (err) => {
             if (err && !err.message.includes('duplicate column')) {
                 console.error('Migration error:', err.message);
             }
@@ -217,22 +229,25 @@ function addUserToDB(user) {
             id, name, email, role, area, status, photo,
             customer_id, order_detail_id, order_id, order_turnstile_id,
             entry_dates, entry_period,
-            start_date, entry_at, expired_date_in, expired_date_out, is_latest
+            start_date, entry_at, expired_date_in, expired_date_out, is_latest,
+            face_group_id
         } = user;
 
         // Insert the new entry
         db.run(
             `INSERT INTO users (
-                id, name, email, role, area, status, photo, 
+                id, name, email, role, area, status, photo,
                 customer_id, order_detail_id, order_id, order_turnstile_id,
                 entry_dates, entry_period,
-                start_date, entry_at, expired_date_in, expired_date_out, is_latest
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                start_date, entry_at, expired_date_in, expired_date_out, is_latest,
+                face_group_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
                 id, name, email, role, area, status, photo,
                 customer_id, order_detail_id, order_id, order_turnstile_id,
                 entry_dates, entry_period,
-                start_date, entry_at, expired_date_in, expired_date_out, is_latest
+                start_date, entry_at, expired_date_in, expired_date_out, is_latest,
+                face_group_id || null
             ],
             function (err) {
                 if (err) return reject(err);
@@ -314,6 +329,51 @@ async function addUserToAllDevices(user) {
                                 const existingIcno = match[1];
                                 console.log(`Found existing IC number: ${existingIcno}. Retrying with this ID...`);
 
+                                // Query the database to get the existing user's expired_date_out and face_group_id
+                                let existingUserExpiredDate = null;
+                                let faceGroupId = null;
+                                let existingUserRecordId = null;
+                                try {
+                                    const existingUser = await new Promise((resolveDb, rejectDb) => {
+                                        db.get(
+                                            "SELECT record_id, expired_date_out, face_group_id FROM users WHERE id = ? ORDER BY entry_at DESC LIMIT 1",
+                                            [existingIcno],
+                                            (dbErr, row) => {
+                                                if (dbErr) rejectDb(dbErr);
+                                                else resolveDb(row);
+                                            }
+                                        );
+                                    });
+                                    if (existingUser) {
+                                        existingUserRecordId = existingUser.record_id;
+                                        if (existingUser.expired_date_out) {
+                                            existingUserExpiredDate = existingUser.expired_date_out;
+                                            console.log(`Found existing user's expired_date_out: ${existingUserExpiredDate}`);
+                                        }
+                                        // Use existing face_group_id or create new one based on the existing user's ID
+                                        faceGroupId = existingUser.face_group_id || `face_${existingIcno}`;
+
+                                        // Update existing user's face_group_id if not set
+                                        if (!existingUser.face_group_id) {
+                                            await new Promise((resolveUpdate, rejectUpdate) => {
+                                                db.run(
+                                                    "UPDATE users SET face_group_id = ? WHERE id = ?",
+                                                    [faceGroupId, existingIcno],
+                                                    (updateErr) => {
+                                                        if (updateErr) rejectUpdate(updateErr);
+                                                        else {
+                                                            console.log(`Updated face_group_id for existing user ${existingIcno}: ${faceGroupId}`);
+                                                            resolveUpdate();
+                                                        }
+                                                    }
+                                                );
+                                            });
+                                        }
+                                    }
+                                } catch (dbErr) {
+                                    console.error(`Error querying/updating existing user: ${dbErr.message}`);
+                                }
+
                                 // Retry with the existing IC number
                                 const retryPayload = {
                                     totalnum: 1,
@@ -345,14 +405,26 @@ async function addUserToAllDevices(user) {
                                 const retryText = Buffer.from(retryRes.data).toString('utf8');
                                 const retryData = JSON.parse(retryText);
 
-                                results.push({
+                                const deviceResult = {
                                     device: device.ip,
                                     result: retryData.result,
                                     message: retryData.message,
                                     originalId: user.id,
                                     updatedId: existingIcno,
                                     retry: true
-                                });
+                                };
+
+                                // Include existing user's expired_date_out if found
+                                if (existingUserExpiredDate) {
+                                    deviceResult.existing_expired_date_out = existingUserExpiredDate;
+                                }
+
+                                // Include face_group_id for grouping duplicate faces
+                                if (faceGroupId) {
+                                    deviceResult.face_group_id = faceGroupId;
+                                }
+
+                                results.push(deviceResult);
                             } else {
                                 // Could not extract ID, return original error
                                 results.push({
@@ -410,7 +482,7 @@ function needsPhotoUpdate(existingPhotoPath, newImageUrl) {
 }
 
 // Updated performLoginAndSync function for main.js
-// Creates ONE record per turnstile_detail with all entry_dates stored as JSON
+// Creates ONE record per customer with all entry_dates stored as JSON (merges multiple access schedules)
 // Only pushes ONCE to device with the latest end date
 async function performLoginAndSync() {
     const now = new Date();
@@ -456,51 +528,67 @@ async function performLoginAndSync() {
         const token = rawToken.includes("|") ? rawToken.split("|")[1].trim() : rawToken.trim();
         console.log("Login successful, token obtained.");
 
-        // 2. Fetch turnstile order details with new API format
+        // 2. Fetch access schedule details with new API format
         const syncResponse = await axios.get(
-            `${apiSettings.BACKOFFICE_API_URL}/turnstiles?store_id=${encodeURIComponent(apiSettings.STORE_ID)}`,
+            `${apiSettings.BACKOFFICE_API_URL}/access-schedules/${encodeURIComponent(apiSettings.STORE_ID)}`,
             { headers: { Authorization: `Bearer ${token}`, Accept: "application/json" } }
         );
 
         const customersData = syncResponse.data?.data || [];
         if (!customersData.length) {
-            console.log("No turnstile data to sync.");
+            console.log("No access schedule data to sync.");
             return { success: true, message: "No new users to sync." };
         }
-        console.log(`Found ${customersData.length} customers with turnstile data to process.`);
+        console.log(`Found ${customersData.length} customers with access schedule data to process.`);
 
-        // 3. Collect all turnstile details from API (one record per turnstile_detail)
+        // 3. Collect access schedule details, merged per customer (handles same user with multiple tickets)
         const validOrderDetailIds = new Set();
-        const allTurnstileDetails = [];
+        const customerMergedMap = new Map();
 
         customersData.forEach(customer => {
-            const { customer_id, name, image, turnstile_details } = customer;
+            const { assignee_id, name, image, access_schedules } = customer;
 
-            if (!turnstile_details || !Array.isArray(turnstile_details)) return;
+            if (!access_schedules || !Array.isArray(access_schedules)) return;
 
-            turnstile_details.forEach(detail => {
-                const { turnstile_detail_id, order_detail_id, entry_dates, entry_period } = detail;
+            access_schedules.forEach(schedule => {
+                const { access_schedule_id, order_detail_id, entry_dates, entry_period } = schedule;
 
-                if (!turnstile_detail_id || !order_detail_id) return;
+                if (!access_schedule_id || !order_detail_id) return;
+
+                // Remove "-" from access_schedule_id to prevent faulty format
+                const cleanedScheduleId = access_schedule_id.toString().replace(/-/g, '');
 
                 validOrderDetailIds.add(order_detail_id);
 
-                allTurnstileDetails.push({
-                    customer_id,
-                    customer_name: name,
-                    customer_image: image,
-                    turnstile_detail_id,
-                    order_detail_id,
-                    entry_dates: entry_dates || [],
-                    entry_period: entry_period || 0
-                });
+                const existing = customerMergedMap.get(assignee_id);
+                if (existing) {
+                    // Same user bought another ticket - merge entry_dates and extend period
+                    const mergedDates = [...new Set([...existing.entry_dates, ...(entry_dates || [])])];
+                    existing.entry_dates = mergedDates;
+                    existing.entry_period = Math.max(existing.entry_period, entry_period || 0);
+                    existing.all_order_detail_ids.push(order_detail_id);
+                    console.log(`Merged schedule ${access_schedule_id} into customer ${assignee_id} (${name}). Total dates: ${mergedDates.length}`);
+                } else {
+                    customerMergedMap.set(assignee_id, {
+                        customer_id: assignee_id,
+                        customer_name: name,
+                        customer_image: image,
+                        turnstile_detail_id: cleanedScheduleId,
+                        order_detail_id,
+                        entry_dates: entry_dates || [],
+                        entry_period: entry_period || 0,
+                        all_order_detail_ids: [order_detail_id]
+                    });
+                }
             });
         });
 
-        console.log(`Total turnstile details to process: ${allTurnstileDetails.length}`);
+        const allTurnstileDetails = Array.from(customerMergedMap.values());
+
+        console.log(`Total customers to process: ${allTurnstileDetails.length}`);
         console.log(`Valid order_detail_ids from API: ${validOrderDetailIds.size}`);
 
-        // 4. Get all existing entries from database (keyed by order_detail_id)
+        // 4. Get all existing entries from database (keyed by order_detail_id and customer_id)
         const existingEntries = await new Promise((resolve, reject) => {
             db.all("SELECT * FROM users WHERE order_detail_id IS NOT NULL", [], (err, rows) => {
                 if (err) reject(err);
@@ -509,16 +597,64 @@ async function performLoginAndSync() {
         });
 
         const existingEntriesMap = new Map();
-        existingEntries.forEach(entry => {
-            existingEntriesMap.set(entry.order_detail_id, entry);
-        });
+        const existingEntriesByCustomerMap = new Map();
+        for (const entry of existingEntries) {
+            // Reformat old order_turnstile_id that still has "-" in it
+            if (entry.order_turnstile_id && entry.order_turnstile_id.toString().includes('-')) {
+                const cleanedId = entry.order_turnstile_id.toString().replace(/-/g, '');
+                await new Promise((resolve, reject) => {
+                    db.run("UPDATE users SET order_turnstile_id = ? WHERE record_id = ?", [cleanedId, entry.record_id], (err) => {
+                        if (err) reject(err);
+                        else {
+                            console.log(`Reformatted order_turnstile_id from ${entry.order_turnstile_id} to ${cleanedId}`);
+                            entry.order_turnstile_id = cleanedId;
+                            resolve();
+                        }
+                    });
+                });
+            }
+
+            // Build order_detail_id map (keep entry with latest expired_date_out)
+            const existingEntry = existingEntriesMap.get(entry.order_detail_id);
+            if (!existingEntry) {
+                existingEntriesMap.set(entry.order_detail_id, entry);
+            } else {
+                const existingDate = existingEntry.expired_date_out ? new Date(existingEntry.expired_date_out) : new Date(0);
+                const newDate = entry.expired_date_out ? new Date(entry.expired_date_out) : new Date(0);
+                if (newDate > existingDate) {
+                    console.log(`Found duplicate order_detail_id ${entry.order_detail_id}. Keeping entry with later date: ${entry.expired_date_out} over ${existingEntry.expired_date_out}`);
+                    existingEntriesMap.set(entry.order_detail_id, entry);
+                }
+            }
+
+            // Build customer_id map (keep entry with latest expired_date_out)
+            if (entry.customer_id) {
+                const existingByCustomer = existingEntriesByCustomerMap.get(entry.customer_id);
+                if (!existingByCustomer) {
+                    existingEntriesByCustomerMap.set(entry.customer_id, entry);
+                } else {
+                    const existingDate = existingByCustomer.expired_date_out ? new Date(existingByCustomer.expired_date_out) : new Date(0);
+                    const newDate = entry.expired_date_out ? new Date(entry.expired_date_out) : new Date(0);
+                    if (newDate > existingDate) {
+                        existingEntriesByCustomerMap.set(entry.customer_id, entry);
+                    }
+                }
+            }
+        }
 
         // 5. Remove entries from DB that are no longer in the API response
+        // Keep entries if their order_detail_id OR customer_id is still active in API
+        // SAFETY: Never remove ALL entries - if removal would wipe everything, skip it
+        const validCustomerIds = new Set(allTurnstileDetails.map(d => d.customer_id));
         const entriesToRemove = existingEntries.filter(entry => {
-            return !validOrderDetailIds.has(entry.order_detail_id);
+            return !validOrderDetailIds.has(entry.order_detail_id) && !validCustomerIds.has(entry.customer_id);
         });
 
-        if (entriesToRemove.length > 0) {
+        // Safety check: if this would remove ALL existing entries, skip removal
+        // This prevents wiping the DB during API format transitions or mismatched data
+        if (entriesToRemove.length > 0 && entriesToRemove.length >= existingEntries.length && existingEntries.length > 0) {
+            console.log(`⚠️ SAFETY: Removal would delete ALL ${existingEntries.length} existing entries. Skipping removal to prevent data loss.`);
+        } else if (entriesToRemove.length > 0) {
             console.log(`Removing ${entriesToRemove.length} entries that are no longer in API...`);
 
             for (const entry of entriesToRemove) {
@@ -550,7 +686,7 @@ async function performLoginAndSync() {
             }
         }
 
-        // 6. Process each turnstile detail (ONE record per order_detail_id)
+        // 6. Process each customer (ONE record per customer, with merged schedules)
         const results = [];
         const entryTimeLimitHours = parseInt(apiSettings.ENTRY_TIME_LIMIT) || 2;
 
@@ -562,10 +698,22 @@ async function performLoginAndSync() {
                 turnstile_detail_id,
                 order_detail_id,
                 entry_dates,
-                entry_period
+                entry_period,
+                all_order_detail_ids
             } = detail;
 
-            const existingEntry = existingEntriesMap.get(order_detail_id);
+            // Check by any of this customer's order_detail_ids first, then fallback to customer_id
+            let existingEntry = null;
+            for (const odId of (all_order_detail_ids || [order_detail_id])) {
+                existingEntry = existingEntriesMap.get(odId);
+                if (existingEntry) break;
+            }
+            if (!existingEntry) {
+                existingEntry = existingEntriesByCustomerMap.get(customer_id);
+                if (existingEntry) {
+                    console.log(`Matched customer ${customer_id} (${customer_name}) by customer_id to existing entry record_id: ${existingEntry.record_id}`);
+                }
+            }
 
             // Calculate the latest end date from entry_dates
             const latestEntryDate = getLatestDate(entry_dates);
@@ -579,35 +727,106 @@ async function performLoginAndSync() {
                 const newEntryDatesJson = JSON.stringify(sortedEntryDates);
                 const newExitDateStr = formatDateForDevice(exitDateTime);
 
+                // Calculate start_date and expired_date_in from API data
+                const earliestEntryDate = entry_dates.length > 0
+                    ? entry_dates.reduce((earliest, current) => new Date(current) < new Date(earliest) ? current : earliest)
+                    : formatDateForDevice(now, false);
+                const newStartDateStr = formatDateForDevice(new Date(earliestEntryDate + "T00:00:00"));
+                const newExpiredDateInStr = formatDateForDevice(latestEntryDateTime);
+
+                // Compare new exit date with existing expired_date_out and use the LATEST one
+                let finalExitDateTime = exitDateTime;
+                let finalExitDateStr = newExitDateStr;
+                if (existingEntry.expired_date_out) {
+                    const existingExitDate = new Date(existingEntry.expired_date_out);
+                    if (existingExitDate > exitDateTime) {
+                        console.log(`Existing expired_date_out (${existingEntry.expired_date_out}) is later than new calculated date (${newExitDateStr}). Keeping existing.`);
+                        finalExitDateTime = existingExitDate;
+                        finalExitDateStr = existingEntry.expired_date_out;
+                    } else {
+                        console.log(`New calculated date (${newExitDateStr}) is later than existing (${existingEntry.expired_date_out}). Using new date.`);
+                    }
+                }
+
+                // Check if photo needs updating from API
+                const photoNeedsUpdate = needsPhotoUpdate(existingEntry.photo, customer_image);
+                let newPhotoPath = existingEntry.photo;
+                let newBase64Image = null;
+
+                if (photoNeedsUpdate && customer_image) {
+                    try {
+                        const imgBase64 = await getImageBase64(customer_image);
+                        if (imgBase64) {
+                            const cleanBase64 = imgBase64.replace(/^data:image\/\w+;base64,/, "");
+                            newBase64Image = cleanBase64;
+                            const buffer = Buffer.from(cleanBase64, "base64");
+                            const fileName = `${customer_id}_${order_detail_id}_${Date.now()}.jpg`;
+                            const uploadsDir = path.join(app.getPath("userData"), "uploads");
+                            fs.mkdirSync(uploadsDir, { recursive: true });
+                            const fullPath = path.join(uploadsDir, fileName);
+                            fs.writeFileSync(fullPath, buffer);
+
+                            // Delete old photo file if it exists and is different
+                            if (existingEntry.photo && existingEntry.photo !== path.join("uploads", fileName)) {
+                                try {
+                                    const oldPath = path.join(app.getPath('userData'), existingEntry.photo);
+                                    if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+                                } catch (e) { /* ignore */ }
+                            }
+
+                            newPhotoPath = path.join("uploads", fileName);
+                            console.log(`📸 Updated photo for customer ${customer_id}: ${newPhotoPath}`);
+                        }
+                    } catch (imgErr) {
+                        console.error(`Failed to download/save updated photo for customer ${customer_id}:`, imgErr.message);
+                    }
+                }
+
                 // Check change detection
                 const datesChanged = existingEntry.entry_dates !== newEntryDatesJson;
                 const periodChanged = existingEntry.entry_period !== entry_period;
-                const expiryChanged = existingEntry.expired_date_out !== newExitDateStr;
+                const expiryChanged = existingEntry.expired_date_out !== finalExitDateStr;
                 const nameChanged = customer_name && existingEntry.name !== customer_name;
+                const startDateChanged = existingEntry.start_date !== newStartDateStr;
+                const expiredDateInChanged = existingEntry.expired_date_in !== newExpiredDateInStr;
+                const photoChanged = newPhotoPath !== existingEntry.photo;
 
-                if (!datesChanged && !periodChanged && !expiryChanged && !nameChanged) {
+                if (!datesChanged && !periodChanged && !expiryChanged && !nameChanged && !startDateChanged && !expiredDateInChanged && !photoChanged) {
                     console.log(`No changes for order_detail_id ${order_detail_id}, skipping DB/Device update.`);
                     results.push({ order_detail_id, updated: false, message: "No changes detected" });
                     continue;
                 }
 
-                // Update existing entry with new entry_dates and expiry
-                console.log(`Updating existing entry for order_detail_id ${order_detail_id}`);
+                // Update existing entry with new data including photo
+                console.log(`Updating existing entry record_id ${existingEntry.record_id} for customer ${customer_id} with start_date: ${newStartDateStr}, expired_date_in: ${newExpiredDateInStr}, expired_date_out: ${finalExitDateStr}, photo updated: ${photoChanged}`);
 
                 await new Promise((resolve, reject) => {
                     db.run(
-                        `UPDATE users SET 
-                            entry_dates = ?, 
+                        `UPDATE users SET
+                            entry_dates = ?,
                             entry_period = ?,
+                            start_date = ?,
+                            expired_date_in = ?,
                             expired_date_out = ?,
-                            name = ?
-                        WHERE order_detail_id = ?`,
+                            name = ?,
+                            photo = ?,
+                            order_detail_id = ?,
+                            order_turnstile_id = ?,
+                            customer_id = ?
+                        WHERE record_id = ?`,
                         [
                             JSON.stringify(sortedEntryDates),
                             entry_period,
-                            formatDateForDevice(exitDateTime),
-                            customer_name || existingEntry.name
-                            , order_detail_id],
+                            newStartDateStr,
+                            newExpiredDateInStr,
+                            finalExitDateStr,
+                            customer_name || existingEntry.name,
+                            newPhotoPath,
+                            order_detail_id,
+                            turnstile_detail_id,
+                            customer_id,
+                            existingEntry.record_id
+                        ],
                         function (err) {
                             if (err) reject(err);
                             else resolve({ changes: this.changes });
@@ -615,17 +834,39 @@ async function performLoginAndSync() {
                     );
                 });
 
-                // Update device with new expiry date
-                const deviceResults = await updateUserOnAllDevices({
-                    id: existingEntry.id,
-                    name: customer_name || existingEntry.name,
-                    expired_date_out: formatDateForDevice(exitDateTime)
+                // Update device with the correct dates and photo
+                let deviceSynced = 0;
+                let deviceResults = [];
+                try {
+                    // If we have a freshly downloaded photo, pass it directly to avoid re-reading from disk
+                    deviceResults = await updateUserOnAllDevices({
+                        id: existingEntry.id,
+                        name: customer_name || existingEntry.name,
+                        start_date: newStartDateStr,
+                        expired_date_out: finalExitDateStr,
+                        base64Override: newBase64Image || null
+                    });
+                    const anySuccess = Array.isArray(deviceResults)
+                        ? deviceResults.some(r => r.result === 0 || r.result === 1)
+                        : (deviceResults && (deviceResults.result === 0 || deviceResults.result === 1));
+                    deviceSynced = anySuccess ? 1 : 0;
+                } catch (deviceErr) {
+                    console.error(`Failed to sync updated user ${existingEntry.id} to devices:`, deviceErr.message);
+                    deviceSynced = 0;
+                }
+
+                // Update device_synced status
+                await new Promise((resolve, reject) => {
+                    db.run("UPDATE users SET device_synced = ? WHERE record_id = ?", [deviceSynced, existingEntry.record_id], (err) => {
+                        if (err) reject(err); else resolve();
+                    });
                 });
 
                 results.push({
                     order_detail_id,
                     updated: true,
                     deviceResults,
+                    deviceSynced,
                     message: "Updated existing entry"
                 });
                 continue;
@@ -691,14 +932,34 @@ async function performLoginAndSync() {
             console.log(`Added new entry for ${user.name}, order_detail_id: ${order_detail_id}`);
 
             // Sync to devices (only once per user with the latest end date)
-            const deviceResults = await addUserToAllDevices(user);
-            console.log(`Synced to devices for ${user.name}:`, deviceResults);
+            let deviceSynced = 0;
+            let deviceResults = [];
+            try {
+                deviceResults = await addUserToAllDevices(user);
+                // Check if at least one device succeeded
+                const anySuccess = Array.isArray(deviceResults)
+                    ? deviceResults.some(r => r.result === 0 || r.result === 1)
+                    : (deviceResults && (deviceResults.result === 0 || deviceResults.result === 1));
+                deviceSynced = anySuccess ? 1 : 0;
+                console.log(`Synced to devices for ${user.name}:`, deviceResults);
+            } catch (deviceErr) {
+                console.error(`Failed to sync ${user.name} to devices:`, deviceErr.message);
+                deviceSynced = 0;
+            }
+
+            // Update device_synced status in DB
+            await new Promise((resolve, reject) => {
+                db.run("UPDATE users SET device_synced = ? WHERE id = ?", [deviceSynced, entryId], (err) => {
+                    if (err) reject(err); else resolve();
+                });
+            });
 
             results.push({
                 order_detail_id,
                 entryId,
                 dbResult,
                 deviceResults,
+                deviceSynced,
                 success: true,
                 created: true
             });
@@ -770,7 +1031,7 @@ async function deleteUserFromAllDevicesInternal(idno) {
     });
 }
 
-// Helper function to update user on all devices (just update expiry, no image)
+// Helper function to update user on all devices (dates + photo)
 async function updateUserOnAllDevices(user) {
     return new Promise((resolve, reject) => {
         db.all("SELECT id, ip FROM devices", [], async (err, devices) => {
@@ -779,15 +1040,52 @@ async function updateUserOnAllDevices(user) {
                 return resolve([{ result: 1, message: "No devices found in local database." }]);
             }
 
+            // Use freshly downloaded photo if provided, otherwise load from DB
+            let base64Image = user.base64Override || null;
+            if (!base64Image) {
+                try {
+                    const userRecord = await new Promise((resolveDb, rejectDb) => {
+                        db.get("SELECT photo FROM users WHERE id = ?", [user.id], (err2, row) => {
+                            if (err2) rejectDb(err2); else resolveDb(row);
+                        });
+                    });
+                    if (userRecord && userRecord.photo) {
+                        const fullPath = path.join(app.getPath('userData'), userRecord.photo);
+                        if (fs.existsSync(fullPath)) {
+                            base64Image = fs.readFileSync(fullPath).toString('base64');
+                        }
+                    }
+                } catch (photoErr) {
+                    console.log('Could not load photo for device update:', photoErr.message);
+                }
+            }
+
             const results = [];
 
             for (const device of devices) {
-                const url = `http://${device.ip}:9090/addDeviceWhiteList`;
-
                 try {
                     const status = await getDeviceStatus(device.ip);
                     if (status === "online") {
-                        // Update with just the new expiry date (no image change)
+                        // Step 1: Delete the user from device first so both start and end dates are refreshed
+                        const deleteUrl = `http://${device.ip}:9090/deleteDeviceWhiteList`;
+                        try {
+                            await axios.post(deleteUrl, {
+                                pass: apiSettings.DEVICE_PASS,
+                                data: {
+                                    idno: user.id,
+                                    usertype: "white"
+                                }
+                            }, {
+                                responseType: 'arraybuffer',
+                                headers: { 'Content-Type': 'application/json; charset=utf-8' }
+                            });
+                            console.log(`Deleted user ${user.id} from device ${device.ip} before re-adding with updated dates`);
+                        } catch (delErr) {
+                            console.log(`Delete before update failed on ${device.ip} (may not exist yet): ${delErr.message}`);
+                        }
+
+                        // Step 2: Re-add the user with updated start and end dates
+                        const addUrl = `http://${device.ip}:9090/addDeviceWhiteList`;
                         const payload = {
                             totalnum: 1,
                             pass: apiSettings.DEVICE_PASS,
@@ -797,13 +1095,21 @@ async function updateUserOnAllDevices(user) {
                                 name: user.name ? user.name.trim().split(/\s+/)[0] : '',
                                 idno: user.id,
                                 icno: user.id,
+                                peoplestartdate: user.start_date || user.expired_date_out.split(' ')[0] + ' 00:00:00',
                                 peopleenddate: user.expired_date_out,
                             }
                         };
 
-                        console.log(`Updating user on device ${device.ip}:`, payload);
+                        // Include photo if available, otherwise use passAlgo
+                        if (base64Image && base64Image.trim() !== "") {
+                            payload.data.picData1 = base64Image;
+                        } else {
+                            payload.data.passAlgo = true;
+                        }
 
-                        const response = await axios.post(url, payload, {
+                        console.log(`Re-adding user on device ${device.ip} with start: ${payload.data.peoplestartdate}, end: ${payload.data.peopleenddate}`);
+
+                        const response = await axios.post(addUrl, payload, {
                             responseType: 'arraybuffer',
                             headers: { 'Content-Type': 'application/json; charset=utf-8' }
                         });
@@ -815,6 +1121,61 @@ async function updateUserOnAllDevices(user) {
                             ...responseData,
                             message: translateDeviceMessage(responseData.message)
                         });
+
+                        // Handle duplicate face: old face data exists under a different idno on the device
+                        if (responseData.result === 1 && responseData.message && responseData.message.includes('照片重复')) {
+                            console.log(`Duplicate face detected on device ${device.ip}. Extracting old ID to delete...`);
+                            const regex = /与[^,]+,(\d+)照片重复/;
+                            const match = responseData.message.match(regex);
+
+                            if (match && match[1]) {
+                                const existingIcno = match[1];
+                                console.log(`Found old device ID: ${existingIcno}. Deleting old entry then re-adding...`);
+
+                                // Delete the old entry that has the conflicting face
+                                try {
+                                    await axios.post(deleteUrl, {
+                                        pass: apiSettings.DEVICE_PASS,
+                                        data: { idno: existingIcno, usertype: "white" }
+                                    }, {
+                                        responseType: 'arraybuffer',
+                                        headers: { 'Content-Type': 'application/json; charset=utf-8' }
+                                    });
+                                    console.log(`Deleted old entry ${existingIcno} from device ${device.ip}`);
+                                } catch (delErr2) {
+                                    console.log(`Failed to delete old entry ${existingIcno}: ${delErr2.message}`);
+                                }
+
+                                // Re-add with the new photo and dates
+                                try {
+                                    const retryResponse = await axios.post(addUrl, payload, {
+                                        responseType: 'arraybuffer',
+                                        headers: { 'Content-Type': 'application/json; charset=utf-8' }
+                                    });
+                                    const retryText = Buffer.from(retryResponse.data).toString('utf8');
+                                    const retryData = JSON.parse(retryText);
+
+                                    console.log(`Device ${device.ip} retry response:`, {
+                                        ...retryData,
+                                        message: translateDeviceMessage(retryData.message)
+                                    });
+
+                                    results.push({
+                                        device: device.ip,
+                                        result: retryData.result,
+                                        message: `(Retry after deleting old face ${existingIcno}) ${retryData.message}`
+                                    });
+                                    continue;
+                                } catch (retryErr) {
+                                    results.push({
+                                        device: device.ip,
+                                        result: -1,
+                                        message: `Retry failed after deleting old face: ${retryErr.message}`
+                                    });
+                                    continue;
+                                }
+                            }
+                        }
 
                         results.push({
                             device: device.ip,
@@ -852,11 +1213,29 @@ function startApiServer() {
     appServer.post('/api/add', async (req, res) => {
         const { icno, user_image } = req.body;
 
+        console.log("\n========================================");
+        console.log("📥 /api/add REQUEST RECEIVED");
+        console.log("========================================");
+
         try {
             if (!icno || icno.trim() === "") {
                 throw new Error("IC number (icno) is required");
             }
 
+            const orderDetailId = req.body.order_detail_id || null;
+            const orderId = req.body.order_id || null;
+            const newExpiredDateOut = req.body.expired_date_out || null;
+            const newStartDate = req.body.start_date || null;
+
+            console.log("📋 Input Data:");
+            console.log(`   - icno: ${icno}`);
+            console.log(`   - order_id: ${orderId}`);
+            console.log(`   - order_detail_id: ${orderDetailId}`);
+            console.log(`   - start_date: ${newStartDate}`);
+            console.log(`   - expired_date_out: ${newExpiredDateOut}`);
+            console.log(`   - has_image: ${user_image ? 'YES' : 'NO'}`);
+
+            // Save photo first
             let photoPath = null;
             if (user_image) {
                 const cleanBase64 = user_image.replace(/^data:image\/\w+;base64,/, "");
@@ -870,8 +1249,17 @@ function startApiServer() {
                 fs.writeFileSync(fullPath, buffer);
 
                 photoPath = path.join("uploads", fileName);
+                console.log(`📸 Photo saved: ${photoPath}`);
             }
 
+            // Extract entry_dates from start_date
+            let entryDates = null;
+            if (newStartDate) {
+                const startDateStr = newStartDate.split(' ')[0];
+                entryDates = JSON.stringify([startDateStr]);
+            }
+
+            // Build user object
             const user = {
                 id: icno,
                 name: req.body.name || icno,
@@ -881,24 +1269,209 @@ function startApiServer() {
                 status: "Paid",
                 base64: user_image || null,
                 photo: photoPath || null,
-                order_detail_id: req.body.order_detail_id || null,
-                order_id: req.body.order_id || null,
-                start_date: req.body.start_date || null,
+                order_detail_id: orderDetailId,
+                order_id: orderId,
+                entry_dates: entryDates,
+                entry_period: 1,
+                start_date: newStartDate,
+                entry_at: new Date().toISOString().replace('T', ' ').slice(0, 19),
                 expired_date_in: req.body.expired_date_in || null,
-                expired_date_out: req.body.expired_date_out || null
+                expired_date_out: newExpiredDateOut
             };
 
-            const dbResult = await addUserToDB(user);
+            // STEP 1: Try to add user to devices first to check for duplicate face
+            console.log("\n🔄 STEP 1: Sending user to devices to check for duplicate face...");
             const deviceResults = await addUserToAllDevices(user);
+
+            console.log("📡 Device Results:");
+            deviceResults.forEach((dr, i) => {
+                console.log(`   Device ${i + 1} (${dr.device}):`);
+                console.log(`      - result: ${dr.result}`);
+                console.log(`      - message: ${dr.message}`);
+                console.log(`      - retry: ${dr.retry || false}`);
+                console.log(`      - updatedId: ${dr.updatedId || 'N/A'}`);
+                console.log(`      - face_group_id: ${dr.face_group_id || 'N/A'}`);
+                console.log(`      - existing_expired_date_out: ${dr.existing_expired_date_out || 'N/A'}`);
+            });
+
+            let duplicateFaceDetected = false;
+            let existingDeviceId = null;
+            let faceGroupId = null;
+            let existingExpiredDateOut = null;
+
+            // Check device results for duplicate face detection
+            for (const deviceResult of deviceResults) {
+                if (deviceResult.retry && deviceResult.updatedId) {
+                    duplicateFaceDetected = true;
+                    existingDeviceId = deviceResult.updatedId;
+                    faceGroupId = deviceResult.face_group_id || `face_${existingDeviceId}`;
+                    existingExpiredDateOut = deviceResult.existing_expired_date_out || null;
+                    break;
+                }
+            }
+
+            console.log("\n🔍 Duplicate Detection Result:");
+            console.log(`   - duplicateFaceDetected: ${duplicateFaceDetected}`);
+            console.log(`   - existingDeviceId: ${existingDeviceId || 'N/A'}`);
+            console.log(`   - faceGroupId: ${faceGroupId || 'N/A'}`);
+            console.log(`   - existingExpiredDateOut: ${existingExpiredDateOut || 'N/A'}`);
+
+            let dbResult;
+
+            if (duplicateFaceDetected && existingDeviceId) {
+                // DUPLICATE FACE: Find existing user in DB and update OR create new entry linked to same face
+                console.log("\n🔄 STEP 2: DUPLICATE FACE - Checking database for existing entry...");
+
+                // Check if this order_detail_id already exists
+                let existingEntry = null;
+
+                if (orderDetailId) {
+                    console.log(`   Searching by order_detail_id: ${orderDetailId}`);
+                    existingEntry = await new Promise((resolve, reject) => {
+                        db.get("SELECT * FROM users WHERE order_detail_id = ?", [orderDetailId], (err, row) => {
+                            if (err) reject(err);
+                            else resolve(row);
+                        });
+                    });
+                    console.log(`   Result: ${existingEntry ? `Found record_id ${existingEntry.record_id}` : 'Not found'}`);
+                }
+
+                // Also check by order_id + icno
+                if (!existingEntry && orderId) {
+                    console.log(`   Searching by icno + order_id: ${icno} + ${orderId}`);
+                    existingEntry = await new Promise((resolve, reject) => {
+                        db.get("SELECT * FROM users WHERE id = ? AND order_id = ?", [icno, orderId], (err, row) => {
+                            if (err) reject(err);
+                            else resolve(row);
+                        });
+                    });
+                    console.log(`   Result: ${existingEntry ? `Found record_id ${existingEntry.record_id}` : 'Not found'}`);
+                }
+
+                // Check by existing device ID (the face is registered under this ID)
+                if (!existingEntry) {
+                    console.log(`   Searching by existingDeviceId: ${existingDeviceId}`);
+                    existingEntry = await new Promise((resolve, reject) => {
+                        db.get("SELECT * FROM users WHERE id = ? ORDER BY entry_at DESC LIMIT 1", [existingDeviceId], (err, row) => {
+                            if (err) reject(err);
+                            else resolve(row);
+                        });
+                    });
+                    console.log(`   Result: ${existingEntry ? `Found record_id ${existingEntry.record_id}` : 'Not found'}`);
+                }
+
+                if (existingEntry) {
+                    console.log("\n📋 Existing Entry Found:");
+                    console.log(`   - record_id: ${existingEntry.record_id}`);
+                    console.log(`   - id: ${existingEntry.id}`);
+                    console.log(`   - order_id: ${existingEntry.order_id}`);
+                    console.log(`   - order_detail_id: ${existingEntry.order_detail_id}`);
+                    console.log(`   - expired_date_out: ${existingEntry.expired_date_out}`);
+
+                    // Update existing entry's end date if new date is later
+                    const existingDate = new Date(existingEntry.expired_date_out || '1970-01-01');
+                    const newDate = new Date(newExpiredDateOut);
+
+                    console.log(`\n📅 Date Comparison:`);
+                    console.log(`   - Existing date: ${existingEntry.expired_date_out} (${existingDate.getTime()})`);
+                    console.log(`   - New date: ${newExpiredDateOut} (${newDate.getTime()})`);
+                    console.log(`   - New date is later: ${newDate > existingDate}`);
+
+                    if (newDate > existingDate) {
+                        console.log("\n✅ Updating existing entry with new end date...");
+
+                        await new Promise((resolve, reject) => {
+                            db.run(
+                                `UPDATE users SET expired_date_out = ?, face_group_id = ?, entry_at = ? WHERE record_id = ?`,
+                                [newExpiredDateOut, faceGroupId, new Date().toISOString().replace('T', ' ').slice(0, 19), existingEntry.record_id],
+                                function (err) {
+                                    if (err) reject(err);
+                                    else {
+                                        console.log(`   Database UPDATE completed. Changes: ${this.changes}`);
+                                        resolve();
+                                    }
+                                }
+                            );
+                        });
+
+                        // Update device with new end date using the existing device ID
+                        console.log(`\n📡 Updating device with new end date for ID: ${existingDeviceId}`);
+                        const deviceUpdateResults = await updateUserOnAllDevices({
+                            id: existingDeviceId,
+                            name: existingEntry.name,
+                            start_date: existingEntry.start_date,
+                            expired_date_out: newExpiredDateOut
+                        });
+                        console.log("   Device update results:", JSON.stringify(deviceUpdateResults, null, 2));
+
+                        dbResult = {
+                            record_id: existingEntry.record_id,
+                            id: existingEntry.id,
+                            changes: 1,
+                            operation: 'UPDATE',
+                            duplicate_face: true,
+                            existing_device_id: existingDeviceId,
+                            previous_expired_date_out: existingEntry.expired_date_out,
+                            new_expired_date_out: newExpiredDateOut
+                        };
+                    } else {
+                        console.log("\n⏭️ SKIPPING - New date is not later than existing date");
+                        dbResult = {
+                            record_id: existingEntry.record_id,
+                            id: existingEntry.id,
+                            changes: 0,
+                            operation: 'SKIP',
+                            duplicate_face: true,
+                            reason: 'New date is not later than existing date'
+                        };
+                    }
+                } else {
+                    // No existing entry in DB - create new entry but link to same face group
+                    console.log("\n📝 No existing entry found. Creating NEW entry with face_group_id...");
+
+                    user.face_group_id = faceGroupId;
+                    dbResult = await addUserToDB(user);
+                    console.log(`   New entry created with record_id: ${dbResult.record_id}`);
+
+                    // Update device with the new end date using existing device ID
+                    console.log(`\n📡 Updating device end date for existing ID: ${existingDeviceId}`);
+                    const deviceUpdateResults = await updateUserOnAllDevices({
+                        id: existingDeviceId,
+                        name: user.name,
+                        start_date: user.start_date,
+                        expired_date_out: newExpiredDateOut
+                    });
+                    console.log("   Device update results:", JSON.stringify(deviceUpdateResults, null, 2));
+
+                    dbResult.duplicate_face = true;
+                    dbResult.existing_device_id = existingDeviceId;
+                    dbResult.face_group_id = faceGroupId;
+                }
+            } else {
+                // NO DUPLICATE: Create new entry normally
+                console.log("\n🔄 STEP 2: NO DUPLICATE FACE - Creating new user entry...");
+
+                dbResult = await addUserToDB(user);
+                dbResult.duplicate_face = false;
+                console.log(`   New entry created with record_id: ${dbResult.record_id}`);
+            }
+
+            console.log("\n========================================");
+            console.log("✅ /api/add RESPONSE");
+            console.log("========================================");
+            console.log("DB Result:", JSON.stringify(dbResult, null, 2));
+            console.log("========================================\n");
 
             res.json({
                 success: true,
-                message: "User added successfully",
+                message: duplicateFaceDetected ? "User linked to existing face" : "User added successfully",
                 db: dbResult,
                 devices: deviceResults
             });
         } catch (err) {
-            console.error("❌ Error in /api/add:", err);
+            console.error("\n========================================");
+            console.error("❌ /api/add ERROR:", err);
+            console.error("========================================\n");
             res.status(500).json({ success: false, message: "Failed to add user", error: err.message });
         }
     });
@@ -1092,6 +1665,14 @@ function startApiServer() {
                     photoPath = path.join("uploads", fileName);
                 }
 
+                // Extract entry_dates from start_date (just the date part) to align with API sync structure
+                let entryDates = null;
+                if (userData.start_date) {
+                    // Extract date part from "2026-01-02 11:33:19" -> "2026-01-02"
+                    const startDateStr = userData.start_date.split(' ')[0];
+                    entryDates = JSON.stringify([startDateStr]);
+                }
+
                 const user = {
                     id: icno,
                     name: userData.name || icno,
@@ -1104,6 +1685,8 @@ function startApiServer() {
                     order_detail_id: userData.order_detail_id || null,
                     order_id: userData.order_id || null,
                     order_turnstile_id: null,
+                    entry_dates: entryDates,
+                    entry_period: 1, // Default to 1 entry for offline adds
                     start_date: userData.start_date || null,
                     entry_at: userData.start_date || null,
                     expired_date_in: userData.start_date || null,
@@ -1295,11 +1878,12 @@ ipcMain.handle('addUserToDevices', async (event, recordId) => {
 ipcMain.handle('db:updateUser', async (event, user) => {
     try {
         const { id, name, start_date, expired_date_in, expired_date_out } = user;
+        console.log(`Received db:updateUser request for ID: ${id}`);
 
-        // Get the latest entry for this user
+        // Get the latest entry for this user - reliable query using record_id
         const latestUser = await new Promise((resolve, reject) => {
             db.get(
-                "SELECT * FROM users WHERE id = ? AND is_latest = 1 ORDER BY entry_at DESC LIMIT 1",
+                "SELECT * FROM users WHERE id = ? ORDER BY record_id DESC LIMIT 1",
                 [id],
                 (err, row) => {
                     if (err) reject(err);
@@ -1309,8 +1893,10 @@ ipcMain.handle('db:updateUser', async (event, user) => {
         });
 
         if (!latestUser) {
-            throw new Error('User not found');
+            console.error(`User with ID ${id} not found in database.`);
+            throw new Error(`User with ID ${id} not found`);
         }
+        console.log(`Found user record ID: ${latestUser.record_id}`);
 
         // Step 1: Update in database
         await new Promise((resolve, reject) => {
@@ -1382,12 +1968,30 @@ ipcMain.handle('db:updateUser', async (event, user) => {
         const deviceResults = [];
 
         for (const device of devices) {
-            const url = `http://${device.ip}:9090/addDeviceWhiteList`;
-
             try {
                 const status = await getDeviceStatus(device.ip);
 
                 if (status === "online") {
+                    // Step 1: Delete user from device first so both start and end dates are refreshed
+                    const deleteUrl = `http://${device.ip}:9090/deleteDeviceWhiteList`;
+                    try {
+                        await axios.post(deleteUrl, {
+                            pass: apiSettings.DEVICE_PASS,
+                            data: {
+                                idno: fullUser.id,
+                                usertype: "white"
+                            }
+                        }, {
+                            responseType: 'arraybuffer',
+                            headers: { 'Content-Type': 'application/json; charset=utf-8' }
+                        });
+                        console.log(`🗑️ Deleted user ${fullUser.id} from device ${device.ip} before re-adding`);
+                    } catch (delErr) {
+                        console.log(`Delete before update failed on ${device.ip} (may not exist yet): ${delErr.message}`);
+                    }
+
+                    // Step 2: Re-add user with updated start and end dates
+                    const addUrl = `http://${device.ip}:9090/addDeviceWhiteList`;
                     const payload = {
                         totalnum: 1,
                         pass: apiSettings.DEVICE_PASS,
@@ -1408,21 +2012,85 @@ ipcMain.handle('db:updateUser', async (event, user) => {
                         payload.data.passAlgo = true;
                     }
 
-                    console.log(`📤 Sending update to device ${device.ip}`);
+                    console.log(`📤 Re-adding user to device ${device.ip} with start: ${payload.data.peoplestartdate}, end: ${payload.data.peopleenddate}`);
 
-                    const response = await axios.post(url, payload);
+                    const response = await axios.post(addUrl, payload, {
+                        responseType: 'arraybuffer',
+                        headers: { 'Content-Type': 'application/json; charset=utf-8' }
+                    });
+
+                    const responseText = Buffer.from(response.data).toString('utf8');
+                    const responseData = JSON.parse(responseText);
+
+                    // Check for duplicate face error
+                    if (responseData.result === 1 && responseData.message && responseData.message.includes('照片重复')) {
+                        console.log(`Duplicate face detected on device ${device.ip}. Attempting to extract existing ID...`);
+
+                        const regex = /与[^,]+,(\d+)照片重复/;
+                        const match = responseData.message.match(regex);
+
+                        if (match && match[1]) {
+                            const existingIcno = match[1];
+                            console.log(`Found existing device ID: ${existingIcno}. Retrying update with this ID...`);
+
+                            // Delete the existing entry by its device ID too
+                            try {
+                                await axios.post(deleteUrl, {
+                                    pass: apiSettings.DEVICE_PASS,
+                                    data: { idno: existingIcno, usertype: "white" }
+                                }, {
+                                    responseType: 'arraybuffer',
+                                    headers: { 'Content-Type': 'application/json; charset=utf-8' }
+                                });
+                            } catch (delErr2) {
+                                console.log(`Delete existing ID ${existingIcno} failed: ${delErr2.message}`);
+                            }
+
+                            const retryPayload = {
+                                ...payload,
+                                data: {
+                                    ...payload.data,
+                                    idno: existingIcno,
+                                    icno: existingIcno,
+                                    name: existingIcno
+                                }
+                            };
+
+                            const retryResponse = await axios.post(addUrl, retryPayload, {
+                                responseType: 'arraybuffer',
+                                headers: { 'Content-Type': 'application/json; charset=utf-8' }
+                            });
+
+                            const retryText = Buffer.from(retryResponse.data).toString('utf8');
+                            const retryData = JSON.parse(retryText);
+
+                            deviceResults.push({
+                                device: device.ip,
+                                result: retryData.result,
+                                message: `(Retry) ${retryData.message}`,
+                                success: retryData.result === 0
+                            });
+
+                            if (retryData.result === 0) {
+                                console.log(`✅ Successfully synced to device ${device.ip} (using existing ID: ${existingIcno})`);
+                            } else {
+                                console.log(`⚠️ Device ${device.ip} retry failed: ${retryData.message}`);
+                            }
+                            continue;
+                        }
+                    }
 
                     deviceResults.push({
                         device: device.ip,
-                        result: response.data.result,
-                        message: response.data.message,
-                        success: response.data.result === 0
+                        result: responseData.result,
+                        message: responseData.message,
+                        success: responseData.result === 0
                     });
 
-                    if (response.data.result === 0) {
+                    if (responseData.result === 0) {
                         console.log(`✅ Successfully synced to device ${device.ip}`);
                     } else {
-                        console.log(`⚠️ Device ${device.ip} returned non-zero result: ${response.data.message}`);
+                        console.log(`⚠️ Device ${device.ip} returned non-zero result: ${responseData.message}`);
                     }
                 } else {
                     deviceResults.push({
@@ -1499,6 +2167,52 @@ ipcMain.handle('api:performSync', async () => {
     } catch (err) {
         console.error("❌ Error performing sync via IPC:", err);
         return { success: false, message: err.message, error: err.response?.data };
+    }
+});
+
+ipcMain.handle('api:resyncUserToDevices', async (event, recordId) => {
+    try {
+        const user = await new Promise((resolve, reject) => {
+            db.get("SELECT * FROM users WHERE record_id = ?", [recordId], (err, row) => {
+                if (err) reject(err); else resolve(row);
+            });
+        });
+        if (!user) return { success: false, message: "User not found" };
+
+        // Read photo base64 if available
+        let base64Image = null;
+        if (user.photo) {
+            try {
+                const fullPath = path.join(app.getPath('userData'), user.photo);
+                if (fs.existsSync(fullPath)) {
+                    base64Image = fs.readFileSync(fullPath).toString('base64');
+                }
+            } catch (e) { /* ignore */ }
+        }
+
+        const deviceResults = await addUserToAllDevices({
+            id: user.id,
+            name: user.name,
+            start_date: user.start_date,
+            expired_date_out: user.expired_date_out,
+            base64: base64Image
+        });
+
+        const anySuccess = Array.isArray(deviceResults)
+            ? deviceResults.some(r => r.result === 0 || r.result === 1)
+            : (deviceResults && (deviceResults.result === 0 || deviceResults.result === 1));
+        const deviceSynced = anySuccess ? 1 : 0;
+
+        await new Promise((resolve, reject) => {
+            db.run("UPDATE users SET device_synced = ? WHERE record_id = ?", [deviceSynced, recordId], (err) => {
+                if (err) reject(err); else resolve();
+            });
+        });
+
+        return { success: true, deviceSynced, deviceResults };
+    } catch (err) {
+        console.error("Resync error:", err);
+        return { success: false, message: err.message };
     }
 });
 
@@ -1618,6 +2332,62 @@ ipcMain.handle('api:openGate', async (event, deviceId) => {
             }
         });
     });
+});
+
+ipcMain.handle('api:updateOrderStatus', async (_event, orderNumber) => {
+    try {
+        // Ensure the base URL is properly formatted
+        let baseUrl = apiSettings.BACKOFFICE_API_URL || '';
+        // Remove trailing slash if exists
+        baseUrl = baseUrl.replace(/\/$/, '');
+
+        console.log(`Authenticating to backend API: ${baseUrl}`);
+
+        // 1. Authenticate to get bearer token
+        const loginResponse = await axios.post(`${baseUrl}/auth/login`, null, {
+            params: {
+                email: apiSettings.API_EMAIL,
+                password: apiSettings.API_PASSWORD,
+            },
+        });
+
+        const rawToken = loginResponse.data?.data?.token || "";
+        const token = rawToken.includes("|") ? rawToken.split("|")[1].trim() : rawToken.trim();
+
+        console.log(`Login successful. Updating order status for ${orderNumber} to Paid`);
+
+        // 2. Update order status with bearer token
+        const response = await axios.patch(
+            `${baseUrl}/orders/status/update`,
+            {
+                order_number: orderNumber,
+                status_name: 'Paid'
+            },
+            {
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json'
+                }
+            }
+        );
+
+        console.log(`Order ${orderNumber} status updated to Paid in backend:`, response.data);
+        return { success: true, data: response.data };
+    } catch (error) {
+        console.error('Error updating order status:', error.response?.data || error.message);
+        console.error('Error details:', {
+            status: error.response?.status,
+            statusText: error.response?.statusText,
+            url: error.config?.url,
+            method: error.config?.method
+        });
+        return {
+            success: false,
+            error: error.response?.data || error.message,
+            status: error.response?.status
+        };
+    }
 });
 
 ipcMain.handle('api:restartDevice', async (event, deviceId) => {
