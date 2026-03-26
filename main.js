@@ -110,6 +110,7 @@ function setupDatabaseAndLoadSettings() {
             is_latest INTEGER DEFAULT 0,
             face_group_id TEXT,
             device_synced INTEGER DEFAULT 0,
+            source TEXT DEFAULT 'local',
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )`);
 
@@ -135,6 +136,11 @@ function setupDatabaseAndLoadSettings() {
             }
         });
         db.run(`ALTER TABLE users ADD COLUMN device_synced INTEGER DEFAULT 0`, (err) => {
+            if (err && !err.message.includes('duplicate column')) {
+                console.error('Migration error:', err.message);
+            }
+        });
+        db.run(`ALTER TABLE users ADD COLUMN source TEXT DEFAULT 'local'`, (err) => {
             if (err && !err.message.includes('duplicate column')) {
                 console.error('Migration error:', err.message);
             }
@@ -230,7 +236,7 @@ function addUserToDB(user) {
             customer_id, order_detail_id, order_id, order_turnstile_id,
             entry_dates, entry_period,
             start_date, entry_at, expired_date_in, expired_date_out, is_latest,
-            face_group_id
+            face_group_id, source
         } = user;
 
         // Insert the new entry
@@ -240,14 +246,14 @@ function addUserToDB(user) {
                 customer_id, order_detail_id, order_id, order_turnstile_id,
                 entry_dates, entry_period,
                 start_date, entry_at, expired_date_in, expired_date_out, is_latest,
-                face_group_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                face_group_id, source
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
                 id, name, email, role, area, status, photo,
                 customer_id, order_detail_id, order_id, order_turnstile_id,
                 entry_dates, entry_period,
                 start_date, entry_at, expired_date_in, expired_date_out, is_latest,
-                face_group_id || null
+                face_group_id || null, source || 'local'
             ],
             function (err) {
                 if (err) return reject(err);
@@ -258,7 +264,7 @@ function addUserToDB(user) {
     });
 }
 
-async function addUserToAllDevices(user) {
+async function addUserToAllDevices(user, options = {}) {
     return new Promise((resolve, reject) => {
         db.all("SELECT id, ip FROM devices", [], async (err, devices) => {
             if (err) return reject({ result: -1, message: "Failed to get devices from DB." });
@@ -374,7 +380,45 @@ async function addUserToAllDevices(user) {
                                     console.error(`Error querying/updating existing user: ${dbErr.message}`);
                                 }
 
-                                // Retry with the existing IC number
+                                // Date-protection: if this is from API sync, check device's current end date
+                                if (options.apiStartDate) {
+                                    try {
+                                        const oldDeviceInfo = await queryDeviceUserEndDate(device.ip, existingIcno);
+                                        if (oldDeviceInfo.found && oldDeviceInfo.peopleenddate) {
+                                            const apiStart = new Date(options.apiStartDate);
+                                            const deviceEnd = new Date(oldDeviceInfo.peopleenddate);
+                                            if (apiStart < deviceEnd) {
+                                                console.log(`Date-protection: API start ${options.apiStartDate} < device end ${oldDeviceInfo.peopleenddate} for existing ID ${existingIcno} on ${device.ip}. Skipping overwrite.`);
+                                                results.push({
+                                                    device: device.ip,
+                                                    result: 0,
+                                                    message: `Skipped: device has longer access (end: ${oldDeviceInfo.peopleenddate}). API start: ${options.apiStartDate}`,
+                                                    originalId: user.id,
+                                                    updatedId: existingIcno,
+                                                    skipped: true,
+                                                    face_group_id: faceGroupId || null
+                                                });
+                                                continue; // Skip to next device
+                                            }
+                                        }
+                                    } catch (dateCheckErr) {
+                                        console.error(`Date-protection query failed for ${existingIcno} on ${device.ip}: ${dateCheckErr.message}. Proceeding with update.`);
+                                    }
+                                }
+
+                                // Delete the old entry first, then re-add with new data
+                                const deleteUrl = `http://${device.ip}:9090/deleteDeviceWhiteList`;
+                                try {
+                                    console.log(`Deleting existing entry ${existingIcno} from device ${device.ip} before re-add...`);
+                                    await axios.post(deleteUrl, {
+                                        pass: apiSettings.DEVICE_PASS,
+                                        data: { idno: existingIcno }
+                                    }, { responseType: 'arraybuffer', timeout: 5000 });
+                                } catch (delErr) {
+                                    console.error(`Failed to delete existing entry ${existingIcno} from ${device.ip}: ${delErr.message}`);
+                                }
+
+                                // Re-add with the existing IC number and new dates
                                 const retryPayload = {
                                     totalnum: 1,
                                     pass: apiSettings.DEVICE_PASS,
@@ -588,9 +632,9 @@ async function performLoginAndSync() {
         console.log(`Total customers to process: ${allTurnstileDetails.length}`);
         console.log(`Valid order_detail_ids from API: ${validOrderDetailIds.size}`);
 
-        // 4. Get all existing entries from database (keyed by order_detail_id and customer_id)
+        // 4. Get existing API-synced entries from database (only entries created by API sync)
         const existingEntries = await new Promise((resolve, reject) => {
-            db.all("SELECT * FROM users WHERE order_detail_id IS NOT NULL", [], (err, rows) => {
+            db.all("SELECT * FROM users WHERE order_detail_id IS NOT NULL AND (source = 'api_sync' OR source IS NULL)", [], (err, rows) => {
                 if (err) reject(err);
                 else resolve(rows || []);
             });
@@ -642,11 +686,13 @@ async function performLoginAndSync() {
             }
         }
 
-        // 5. Remove entries from DB that are no longer in the API response
-        // Keep entries if their order_detail_id OR customer_id is still active in API
+        // 5. Remove API-synced entries from DB that are no longer in the API response
+        // Only removes entries with source='api_sync' — locally added or kiosk entries are never removed
         // SAFETY: Never remove ALL entries - if removal would wipe everything, skip it
         const validCustomerIds = new Set(allTurnstileDetails.map(d => d.customer_id));
         const entriesToRemove = existingEntries.filter(entry => {
+            // Only consider removing entries that came from API sync
+            if (entry.source && entry.source !== 'api_sync') return false;
             return !validOrderDetailIds.has(entry.order_detail_id) && !validCustomerIds.has(entry.customer_id);
         });
 
@@ -812,7 +858,8 @@ async function performLoginAndSync() {
                             photo = ?,
                             order_detail_id = ?,
                             order_turnstile_id = ?,
-                            customer_id = ?
+                            customer_id = ?,
+                            source = 'api_sync'
                         WHERE record_id = ?`,
                         [
                             JSON.stringify(sortedEntryDates),
@@ -925,7 +972,8 @@ async function performLoginAndSync() {
                 entry_at: formatDateForDevice(new Date(earliestEntryDate + "T00:00:00")),
                 expired_date_in: formatDateForDevice(latestEntryDateTime),
                 expired_date_out: formatDateForDevice(exitDateTime),
-                is_latest: 1
+                is_latest: 1,
+                source: 'api_sync'
             };
 
             // Add to database
@@ -936,7 +984,7 @@ async function performLoginAndSync() {
             let deviceSynced = 0;
             let deviceResults = [];
             try {
-                deviceResults = await addUserToAllDevices(user);
+                deviceResults = await addUserToAllDevices(user, { apiStartDate: user.start_date });
                 // Check if at least one device succeeded
                 const anySuccess = Array.isArray(deviceResults)
                     ? deviceResults.some(r => r.result === 0 || r.result === 1)
@@ -1365,7 +1413,8 @@ function startApiServer() {
                 start_date: newStartDate,
                 entry_at: new Date().toISOString().replace('T', ' ').slice(0, 19),
                 expired_date_in: req.body.expired_date_in || null,
-                expired_date_out: newExpiredDateOut
+                expired_date_out: newExpiredDateOut,
+                source: 'kiosk'
             };
 
             // STEP 1: Try to add user to devices first to check for duplicate face
@@ -1467,12 +1516,12 @@ function startApiServer() {
                     console.log(`   - New date is later: ${newDate > existingDate}`);
 
                     if (newDate > existingDate) {
-                        console.log("\n✅ Updating existing entry with new end date...");
+                        console.log("\n✅ Updating existing entry with new dates...");
 
                         await new Promise((resolve, reject) => {
                             db.run(
-                                `UPDATE users SET expired_date_out = ?, face_group_id = ?, entry_at = ? WHERE record_id = ?`,
-                                [newExpiredDateOut, faceGroupId, new Date().toISOString().replace('T', ' ').slice(0, 19), existingEntry.record_id],
+                                `UPDATE users SET start_date = ?, expired_date_in = ?, expired_date_out = ?, face_group_id = ?, entry_at = ?, source = 'kiosk' WHERE record_id = ?`,
+                                [newStartDate, req.body.expired_date_in || newStartDate, newExpiredDateOut, faceGroupId, new Date().toISOString().replace('T', ' ').slice(0, 19), existingEntry.record_id],
                                 function (err) {
                                     if (err) reject(err);
                                     else {
@@ -1483,12 +1532,12 @@ function startApiServer() {
                             );
                         });
 
-                        // Update device with new end date using the existing device ID
-                        console.log(`\n📡 Updating device with new end date for ID: ${existingDeviceId}`);
+                        // Update device with new dates using the existing device ID
+                        console.log(`\n📡 Updating device with new dates for ID: ${existingDeviceId}`);
                         const deviceUpdateResults = await updateUserOnAllDevices({
                             id: existingDeviceId,
                             name: existingEntry.name,
-                            start_date: existingEntry.start_date,
+                            start_date: newStartDate,
                             expired_date_out: newExpiredDateOut
                         });
                         console.log("   Device update results:", JSON.stringify(deviceUpdateResults, null, 2));
@@ -1780,7 +1829,8 @@ function startApiServer() {
                     entry_at: userData.start_date || null,
                     expired_date_in: userData.start_date || null,
                     expired_date_out: userData.expired_date_out || null,
-                    is_latest: 1 // Mark as latest entry
+                    is_latest: 1, // Mark as latest entry
+                    source: 'kiosk'
                 };
 
                 // Add user to database
